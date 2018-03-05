@@ -1,0 +1,49 @@
+#!perl
+
+# DATE
+# VERSION
+
+use 5.010001;
+use strict;
+use warnings;
+
+use Perinci::CmdLine::cryp;
+
+my $prefix = '/App/cryp/arbit/';
+
+Perinci::CmdLine::cryp->new(
+    url => "${prefix}app",
+    log => 1,
+    pass_cmdline_object => 1,
+    config_filename => ["cryp.conf", "cryp-arbit.conf"],
+)->run;
+
+# ABSTRACT:
+# PODNAME:
+
+=head1 SYNOPSIS
+
+In F<~/.config/cryp-arbit.conf> (or F<~/.config/cryp.conf> as the configuration
+can be shared between cryp-* family of scripts):
+
+ [program=cryp-arbit]
+ db_name = cryp_arbit
+ ; db_username = youruser         ; optional, will be searched in ~/.my.cnf
+ ; db_password = yourpass         ; optional, will be searched in ~/.my.cnf
+
+ [exchange/bitcoin indonesia]
+ key = ...
+ secret = ...
+
+ [exchange/gdax]
+ key = ...
+ secret = ...
+ passphrase = ...
+
+Then to test:
+
+ % cryp-arbit --trace --dry-run
+
+To really submit sell/buy orders:
+
+ % cryp-arbit --trace
