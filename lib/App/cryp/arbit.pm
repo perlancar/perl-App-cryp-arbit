@@ -56,6 +56,12 @@ our $db_schema_spec = {
              price DECIMAL(21,8) NOT NULL, -- price to buy currency1 in currency2, e.g. currency1 = BTC, currency2 = USD, price = 11150
              exchange_id INT,              -- either set this...
              place VARCHAR(10) NOT NULL,   -- ...or fill this e.g. "klikbca"
+
+             high DECIMAL(21,8),
+             low DECIMAL(21,8),
+             open DECIMAL(21,8),
+             vol24h DECIMAL(21,8),
+
              note VARCHAR(255)
          )',
         'CREATE TABLE `order` (
@@ -110,14 +116,61 @@ sub _init {
         $r->{args}{db_password},
         {RaiseError => 1},
     );
+    my $dbh = $r->{_dbh};
 
     require SQL::Schema::Versioned;
     my $res = SQL::Schema::Versioned::create_or_update_db_schema(
         dbh => $r->{_dbh}, spec => $db_schema_spec,
     );
-
     die "Cannot run the application: cannot create/upgrade database schema: $res->[1]"
         unless $res->[0] == 200;
+
+    # create exchange accounts & API clients
+    {
+        my $time = time();
+
+        $dbh->do("INSERT IGNORE INTO exchange (safename) VALUES ('gdax')");
+        $dbh->do("INSERT IGNORE INTO exchange (safename) VALUES ('bitcoin-indonesia')");
+        my ($eid_gdax)  = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='gdax'");
+        my ($eid_btcid) = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='bitcoin-indonesia'");
+        $r->{_eid_gdax}  = $eid_gdax;
+        $r->{_eid_btcid} = $eid_btcid;
+
+        unless ($r->{_cryp}{exchanges}{gdax}{default}) {
+            die "Please specify [exchange/gdax] section in configuration";
+        }
+        my ($aid_gdax)  = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_gdax  AND note='default'");
+        if (!$aid_gdax) {
+            $dbh->do("INSERT INTO account (ctime, exchange_id, note) VALUES (?,?,?)", {}, $time, $eid_gdax, 'default');
+            ($aid_gdax) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_gdax  AND note='default'");
+            $r->{_aid_gdax}  = $aid_gdax;
+        }
+        if (!$r->{_gdaxlite}) {
+            require FInance::GDAX::Lite;
+            $r->{_gdaxlite} = FInance::GDAX::Lite->new(
+                key        => $r->{_cryp}{exchanges}{gdax}{default}{key},
+                secret     => $r->{_cryp}{exchanges}{gdax}{default}{secret},
+                passphrase => $r->{_cryp}{exchanges}{gdax}{default}{passphrase},
+            );
+        }
+
+        unless ($r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}) {
+            die "Please specify [bitcoin-indonesia/gdax] section in configuration";
+        }
+        my ($aid_btcid) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_btcid AND note='default'");
+        if (!$aid_btcid) {
+            $dbh->do("INSERT INTO account (ctime, exchange_id, note) VALUES (?,?,?)", {}, $time, $eid_btcid, 'default');
+            ($aid_btcid) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_btcid  AND note='default'");
+            $r->{_aid_btcid} = $aid_btcid;
+        }
+        if (!$r->{_btcid}) {
+            require FInance::BTCIndo;
+            $r->{_btcid} = FInance::BTCIndo->new(
+                key        => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{key},
+                secret     => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{secret},
+            );
+        }
+    }
 
     [200];
 }
@@ -155,7 +208,7 @@ sub _get_exchange_rates {
             }
             my ($x1, $x2) = ($res->[2]{currencies}{USD}{sell_er}, $res->[2]{currencies}{USD}{buy_er});
             if (!$x1 || !$x2) {
-                log_warn "sell_er and/or buy_er prices are zero or not found, skipped using KlikBCA prices";
+                log_warn "sell_er and/or buy_er prices are zero or not found, skipping using KlikBCA prices";
                 last TRY_KLIKBCA;
             }
             $price_usd_idr = $x1;
@@ -186,7 +239,7 @@ sub _get_exchange_rates {
             }
             my ($x1, $x2) = ($res->[2]{currencies}{USD}{sell}, $res->[2]{currencies}{USD}{buy});
             if (!$x1 || !$x2) {
-                log_warn "sell and/or buy prices are zero or not found, skipped using GMC prices";
+                log_warn "sell and/or buy prices are zero or not found, skipping using GMC prices";
                 last TRY_GMC;
             }
             $price_usd_idr = $x1;
@@ -216,8 +269,8 @@ sub _get_exchange_rates {
     }
 
     [200, "OK", {
-        usd_idr => $price_usd_idr,
-        idr_usd => $price_idr_usd,
+        USD_IDR => $price_usd_idr,
+        IDR_USD => $price_idr_usd,
     }];
 }
 
@@ -227,6 +280,56 @@ sub _check_prices {
     my $dbh = $r->{_dbh};
 
     my $res = _get_exchange_rates($r);
+
+    my @currencies = ("BTC", "BCH", "LTC", "ETH"); # XXX currently hardcoded
+  CURRENCY:
+    for my $currencies (@currencies) {
+        my %prices; # key = {exchange_id}{currency}, val = price in USD
+      CHECK_GDAX:
+        {
+            for my $c (@currencies) {
+                my $time = time();
+                log_trace "Checking $c-USD price on GDAX ...";
+                my $res = $r->{_gdaxlite}->public_request(
+                    GET => "/products/$c-USD/stats");
+                unless ($res->[0] == 200) {
+                    log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
+                    next CURRENCY;
+                }
+                log_trace "$c-USD price on GDAX: %s", $res->[2];
+                if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
+                    log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
+                    next CURRENCY;
+                }
+                $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
+                         $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
+                         $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
+                     );
+            }
+        } # CHECK_GDAX
+
+      CHECK_BTCID:
+        {
+            for my $c (@currencies) {
+                my $time = time();
+                log_trace "Checking $c-USD price on Bitcoin Indonesia ...";
+                my $res = $r->{_btcid}->public_request(
+                    GET => "/products/$c-USD/stats");
+                unless ($res->[0] == 200) {
+                    log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
+                    next CURRENCY;
+                }
+                log_trace "$c-USD price on GDAX: %s", $res->[2];
+                if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
+                    log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
+                    next CURRENCY;
+                }
+                $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
+                         $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
+                         $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
+                     );
+        } # CHECK_BTCID
+    }
 
     [200];
 }
