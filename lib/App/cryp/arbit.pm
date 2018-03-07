@@ -55,7 +55,7 @@ our $db_schema_spec = {
              currency2 VARCHAR(10) NOT NULL,
              price DECIMAL(21,8) NOT NULL, -- price to buy currency1 in currency2, e.g. currency1 = BTC, currency2 = USD, price = 11150
              exchange_id INT,              -- either set this...
-             place VARCHAR(10) NOT NULL,   -- ...or fill this e.g. "klikbca"
+             place VARCHAR(10),            -- ...or fill this e.g. "klikbca"
 
              high DECIMAL(21,8),
              low DECIMAL(21,8),
@@ -63,6 +63,17 @@ our $db_schema_spec = {
              vol24h DECIMAL(21,8),
 
              note VARCHAR(255)
+         )',
+        'CREATE TABLE `pricediff` (
+             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+             ctime DOUBLE NOT NULL, INDEX(ctime),
+             currency1 VARCHAR(10) NOT NULL,
+             currency2 DECIMAL(21,8) NOT NULL,
+             price1 DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2, in exchange1
+             price2 DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2, in exchange2
+             exchange1_id INT NOT NULL,
+             exchange2_id INT NOT NULL
+             -- amount DECIMAL(21,8)           -- potential amount possible (from market depth)
          )',
         'CREATE TABLE `order` (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
@@ -146,8 +157,8 @@ sub _init {
             $r->{_aid_gdax}  = $aid_gdax;
         }
         if (!$r->{_gdaxlite}) {
-            require FInance::GDAX::Lite;
-            $r->{_gdaxlite} = FInance::GDAX::Lite->new(
+            require Finance::GDAX::Lite;
+            $r->{_gdaxlite} = Finance::GDAX::Lite->new(
                 key        => $r->{_cryp}{exchanges}{gdax}{default}{key},
                 secret     => $r->{_cryp}{exchanges}{gdax}{default}{secret},
                 passphrase => $r->{_cryp}{exchanges}{gdax}{default}{passphrase},
@@ -164,8 +175,8 @@ sub _init {
             $r->{_aid_btcid} = $aid_btcid;
         }
         if (!$r->{_btcid}) {
-            require FInance::BTCIndo;
-            $r->{_btcid} = FInance::BTCIndo->new(
+            require Finance::BTCIndo;
+            $r->{_btcid} = Finance::BTCIndo->new(
                 key        => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{key},
                 secret     => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{secret},
             );
@@ -283,53 +294,50 @@ sub _check_prices {
 
     my @currencies = ("BTC", "BCH", "LTC", "ETH"); # XXX currently hardcoded
   CURRENCY:
-    for my $currencies (@currencies) {
+    for my $c (@currencies) {
         my %prices; # key = {exchange_id}{currency}, val = price in USD
       CHECK_GDAX:
         {
-            for my $c (@currencies) {
-                my $time = time();
-                log_trace "Checking $c-USD price on GDAX ...";
-                my $res = $r->{_gdaxlite}->public_request(
-                    GET => "/products/$c-USD/stats");
-                unless ($res->[0] == 200) {
-                    log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
-                    next CURRENCY;
-                }
-                log_trace "$c-USD price on GDAX: %s", $res->[2];
-                if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
-                    log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
-                    next CURRENCY;
-                }
-                $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
-                         $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
-                         $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
-                     );
+            my $time = time();
+            log_trace "Checking $c-USD price on GDAX ...";
+            my $res = $r->{_gdaxlite}->public_request(
+                GET => "/products/$c-USD/stats");
+            unless ($res->[0] == 200) {
+                log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
+                next CURRENCY;
             }
+            log_trace "$c-USD price on GDAX: %s", $res->[2];
+            if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
+                log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
+                next CURRENCY;
+            }
+            $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
+                     $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
+                     $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
+                 );
         } # CHECK_GDAX
 
       CHECK_BTCID:
         {
-            for my $c (@currencies) {
-                my $time = time();
-                log_trace "Checking $c-USD price on Bitcoin Indonesia ...";
-                my $res = $r->{_btcid}->public_request(
-                    GET => "/products/$c-USD/stats");
-                unless ($res->[0] == 200) {
-                    log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
-                    next CURRENCY;
-                }
-                log_trace "$c-USD price on GDAX: %s", $res->[2];
-                if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
-                    log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
-                    next CURRENCY;
-                }
-                $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
-                         $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
-                         $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
-                     );
+            my $time = time();
+            log_trace "Checking $c-IDR price on Bitcoin Indonesia ...";
+            my $res;
+            eval { $res = $r->{_btcid}->get_ticker(pair => lc("${c}_idr"))->{ticker} };
+            if ($@) {
+                log_error "Died when checking $c-IDR price on Bitcoin Indonesia: $@, skipping $c";
+                next CURRENCY;
+            }
+            log_trace "$c-IDR ticker on Bitcoin Indonesia: %s", $res;
+            if (!$res->{high} || !$res->{low} || !$res->{last} || !$res->{"vol_".lc($c)}) {
+                log_error "One or more of high/low/last/vol_".lc($c)." is zero/empty, skipping $c";
+                next CURRENCY;
+            }
+            $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
+                     $time, $c, "IDR", $r->{_eid_btcid}, $res->{last},
+                     $res->{high}, $res->{low}, $res->{"vol_".lc($c)},
+                 );
         } # CHECK_BTCID
-    }
+    } # for currency
 
     [200];
 }
@@ -374,6 +382,7 @@ sub app {
 
     while (1) {
         _check_prices($r);
+        log_trace "Sleeping %d second(s) ...", $args{check_prices_frequency};
         sleep $args{check_prices_frequency};
     }
 
