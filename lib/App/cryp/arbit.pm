@@ -40,6 +40,7 @@ our $db_schema_spec = {
     install => [
         'CREATE TABLE exchange (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+             shortname VARCHAR(8) NOT NULL, UNIQUE(shortname),
              safename VARCHAR(100) NOT NULL, UNIQUE(safename)
          )',
         'CREATE TABLE account (
@@ -140,8 +141,8 @@ sub _init {
     {
         my $time = time();
 
-        $dbh->do("INSERT IGNORE INTO exchange (safename) VALUES ('gdax')");
-        $dbh->do("INSERT IGNORE INTO exchange (safename) VALUES ('bitcoin-indonesia')");
+        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('GDAX','gdax')");
+        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('VIP','bitcoin-indonesia')");
         my ($eid_gdax)  = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='gdax'");
         my ($eid_btcid) = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='bitcoin-indonesia'");
         $r->{_eid_gdax}  = $eid_gdax;
@@ -181,12 +182,20 @@ sub _init {
                 secret     => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{secret},
             );
         }
+
+        my $sth = $dbh->prepare("SELECT id, shortname FROM exchange");
+        $sth->execute;
+        my %exchanges;
+        while (my $row = $sth->fetchrow_hashref) {
+            $exchanges{$row->{id}} = $row->{shortname};
+        }
+        $r->{_exchanges} = \%exchanges;
     }
 
     [200];
 }
 
-sub _get_exchange_rates {
+sub _update_exchange_rates {
     my $r = shift;
 
     my $dbh = $r->{_dbh};
@@ -279,10 +288,12 @@ sub _get_exchange_rates {
         }
     }
 
-    [200, "OK", {
+    $r->{_fxrates} = {
         USD_IDR => $price_usd_idr,
         IDR_USD => $price_idr_usd,
-    }];
+    };
+
+    [200];
 }
 
 sub _check_prices {
@@ -290,12 +301,14 @@ sub _check_prices {
 
     my $dbh = $r->{_dbh};
 
-    my $res = _get_exchange_rates($r);
+    _update_exchange_rates($r);
 
     my @currencies = ("BTC", "BCH", "LTC", "ETH"); # XXX currently hardcoded
   CURRENCY:
     for my $c (@currencies) {
-        my %prices; # key = {exchange_id}{currency}, val = price in USD
+        my %prices; # key = exchange_id, val = price in USD
+        my %vols  ; # key = exchange_id, val = volume in USD
+
       CHECK_GDAX:
         {
             my $time = time();
@@ -315,6 +328,8 @@ sub _check_prices {
                      $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
                      $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
                  );
+            $prices{$r->{_eid_gdax}} = $res->[2]{last};
+            $vols  {$r->{_eid_gdax}} = $res->[2]{volume} * $res->[2]{last};
         } # CHECK_GDAX
 
       CHECK_BTCID:
@@ -328,15 +343,45 @@ sub _check_prices {
                 next CURRENCY;
             }
             log_trace "$c-IDR ticker on Bitcoin Indonesia: %s", $res;
-            if (!$res->{high} || !$res->{low} || !$res->{last} || !$res->{"vol_".lc($c)}) {
-                log_error "One or more of high/low/last/vol_".lc($c)." is zero/empty, skipping $c";
+            my $volkey = "vol_".lc($c);
+            if (!$res->{high} || !$res->{low} || !$res->{last} || !$res->{$volkey}) {
+                log_error "One or more of high/low/last/$volkey is zero/empty, skipping $c";
                 next CURRENCY;
             }
             $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
                      $time, $c, "IDR", $r->{_eid_btcid}, $res->{last},
-                     $res->{high}, $res->{low}, $res->{"vol_".lc($c)},
+                     $res->{high}, $res->{low}, $res->{$volkey},
                  );
+            $prices{$r->{_eid_btcid}} = $res->{last} * $r->{_fxrates}{IDR_USD};
+            $vols  {$r->{_eid_btcid}} = $res->{$volkey} * $res->{last} * $r->{_fxrates}{IDR_USD};
         } # CHECK_BTCID
+
+        # calculate arbitrage possibility
+        my @diffs;
+        {
+            my %seen;
+            for my $eid1 (sort {$a<=>$b} keys %prices) {
+                for my $eid2 (sort {$a<=>$b} keys %prices) {
+                    next if $eid1 == $eid2;
+                    next if $seen{"$eid1-$eid2"}++;
+                    my $price1 = $prices{$eid1};
+                    my $price2 = $prices{$eid2};
+                    my $lower  = $price1 < $price2 ? $price1 : $price2;
+                    push @diffs, {
+                        exchange1 => $r->{_exchanges}{$eid1},
+                        exchange2 => $r->{_exchanges}{$eid2},
+                        price1    => $price1,
+                        price2    => $price2,
+                        vol1      => $volumes{$eid1};
+                        vol2      => $volumes{$eid2};
+                        diff      => abs($price1-$price2),
+                        diff_pct  => sprintf "%.2f", ($price1-$price2)/$lower * 100,
+                    };
+                }
+            }
+            log_trace "Price differences: %s", \@diffs;
+        }
+
     } # for currency
 
     [200];
@@ -367,6 +412,9 @@ $SPEC{app} = {
             schema => 'posint*',
             default => 2*60,
             tags => ['category:timing'],
+        },
+        arbitrage_threshold_percentage => {
+            schema => 'float*',
         },
     },
     features => {
