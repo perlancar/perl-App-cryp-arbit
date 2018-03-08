@@ -12,10 +12,13 @@ use Perinci::CmdLine::cryp;
 my $prefix = '/App/cryp/arbit/';
 
 Perinci::CmdLine::cryp->new(
-    url => "${prefix}app",
+    url => $prefix,
     log => 1,
     pass_cmdline_object => 1,
     config_filename => ["cryp.conf", "cryp-arbit.conf"],
+    subcommands => {
+        arbit => { url=>"${prefix}arbit" },
+    },
 )->run;
 
 # ABSTRACT:
@@ -42,8 +45,18 @@ can be shared between cryp-* family of scripts):
 
 Then to test:
 
- % cryp-arbit --trace --dry-run
+ % cryp-arbit arbit --trace --dry-run
 
 To really submit sell/buy orders:
 
- % cryp-arbit --trace
+ % cryp-arbit arbit --trace
+
+For other subcommands, use C<cryp-arbit --help> or see the documentation.
+
+
+=head1 DESCRIPTION
+
+
+=head1 SEE ALSO
+
+Other scripts in the C<cryp-*> family.

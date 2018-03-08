@@ -14,6 +14,7 @@ use Time::HiRes qw(time);
 our %SPEC;
 
 $SPEC{':package'} = {
+    summary => 'A cryptocurrency arbitrage script',
     v => 1.1,
 };
 
@@ -57,41 +58,40 @@ our $db_schema_spec = {
              price DECIMAL(21,8) NOT NULL, -- price to buy currency1 in currency2, e.g. currency1 = BTC, currency2 = USD, price = 11150
              exchange_id INT,              -- either set this...
              place VARCHAR(10),            -- ...or fill this e.g. "klikbca"
-
-             high DECIMAL(21,8),
-             low DECIMAL(21,8),
-             open DECIMAL(21,8),
-             vol24h DECIMAL(21,8),
-
              note VARCHAR(255)
          )',
-        'CREATE TABLE `pricediff` (
+        'CREATE TABLE `orderpair` (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             ctime DOUBLE NOT NULL, INDEX(ctime),
-             currency1 VARCHAR(10) NOT NULL,
-             currency2 DECIMAL(21,8) NOT NULL,
-             price1 DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2, in exchange1
-             price2 DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2, in exchange2
-             exchange1_id INT NOT NULL,
-             exchange2_id INT NOT NULL
-             -- amount DECIMAL(21,8)           -- potential amount possible (from market depth)
-         )',
-        'CREATE TABLE `order` (
-             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             pair_id INT, INDEX(pair_id), -- orders are created in pairs
              ctime DOUBLE NOT NULL, INDEX(ctime), -- create time in our database
-             type VARCHAR(4) NOT NULL, -- buy/sell
-             exchange_ctime DOUBLE, -- create time in exchange
-             exchange_id INT NOT NULL,
-             id_in_exchange VARCHAR(32),
-             -- UNIQUE(exchange_id, type, id_id_exchange) -- i think some exchanges reuse order ids?
-             currency1 VARCHAR(10) NOT NULL,
-             currency2 VARCHAR(10) NOT NULL,
-             price DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2, e.g. currency1 = BTC, currency2 = USD, price = 11150
-             amount DECIMAL(21,8) NOT NULL,
-             status VARCHAR(16) NOT NULL, -- opening (submitting to exchange), open (created and open), pausing, paused, completing, completed, cancelling, cancelled
+
+             currency1 VARCHAR(10) NOT NULL, -- the currency we are arbitraging
+             currency2 VARCHAR(10) NOT NULL, -- the pair currency (usually fiat, or BTC)
+
+             amount DECIMAL(21,8) NOT NULL, -- amount of currency1 that we are arbitraging (sell on "sell_exchange" and buy on "buy_exchange")
+
+             -- we sell "amount" of "currency1" on "sell_exchange" at "sell_price" (in currency2)
+             sell_exchange_id INT NOT NULL,
+             sell_exchange_ctime DOUBLE, -- create time in "sell_exchange"
+             sell_exchange_order_id VARCHAR(32),
+             sell_price DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2 when selling, should be > "buy_price"
+             sell_remaining DECIMAL(21,8) NOT NULL,
+             sell_order_status VARCHAR(16) NOT NULL,
+
+             -- then buy the same "amount" of "currency1" on "buy_exchange" at "buy_price" (in currency2)
+             buy_exchange_id INT NOT NULL,
+             buy_exchange_ctime DOUBLE, -- order create time in "buy_exchange"
+             buy_exchange_order_id VARCHAR(32),
+             buy_price DECIMAL(21,8) NOT NULL, -- price of currency1 in currency2 when buying, should be < "sell_price"
+             buy_remaining DECIMAL(21,8) NOT NULL,
+             buy_status VARCHAR(16) NOT NULL,
+
+             -- possible statuses: dummy, opening (submitting to exchange), open (created and open), pausing, paused, completing, completed, cancelling, cancelled
+
+             net_profit_pct DOUBLE NOT NULL, -- predicted net profit percentage (after trading fees)
+
              note VARCHAR(255)
          )',
+
         # XXX order_log (change of status)
         'CREATE TABLE tx (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
@@ -296,6 +296,11 @@ sub _update_exchange_rates {
     [200];
 }
 
+sub _arbitrage {
+    my ($r, $bids, $asks) = @_;
+
+}
+
 sub _check_prices {
     my $r = shift;
 
@@ -309,85 +314,182 @@ sub _check_prices {
         my %prices; # key = exchange_id, val = price in USD
         my %vols  ; # key = exchange_id, val = volume in USD
 
+        my %asks; # key = exchange_id, val = [[lowest-price-in-USD , amount-of-currency], [2nd-lowest-price-in-USD , amount-of-currency], ...]
+        my %bids; # key = exchange_id, val = [[highest-price-in-USD, amount-of-currency], [2nd-highest-price-in-USD, amount-of-currency], ...]
+
+        # XXX hardcoded for now
+        my %fees_pct; # key = exchange_id, val = market taker fees
+        $fees_pct{$r->{_eid_gdax}}  = $c eq 'BTC' ? 0.25 : 0.3;
+        $fees_pct{$r->{_eid_btcid}} = 0.3;
+
       CHECK_GDAX:
         {
-            my $time = time();
-            log_trace "Checking $c-USD price on GDAX ...";
+            my $time;
+
+            $time = time();
+            log_trace "Checking $c-USD order book on GDAX ...";
             my $res = $r->{_gdaxlite}->public_request(
-                GET => "/products/$c-USD/stats");
+                GET => "/products/$c-USD/book?level=2",
+            );
             unless ($res->[0] == 200) {
-                log_error "Couldn't check $c-USD price on GDAX: $res->[0] - $res->[1], skipping $c";
-                next CURRENCY;
+                log_error "Couldn't get $c-USD order book on GDAX: $res->[0] - $res->[1], skipping GDAX";
+                last CHECK_GDAX;
             }
-            log_trace "$c-USD price on GDAX: %s", $res->[2];
-            if (!$res->[2]{high} || !$res->[2]{low} || !$res->[2]{open} || !$res->[2]{last} || !$res->[2]{volume}) {
-                log_error "One or more of high/low/open/last/volume is zero/empty, skipping $c";
-                next CURRENCY;
+            # log_trace "$c-USD order book on GDAX: %s", $res->[2]; # too much info to log
+            for (@{ $res->[2]{asks} }, @{ $res->[2]{bids} }) {
+                $_->[1] *= $_->[2];
+                splice @$_, 2;
             }
-            $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
-                     $time, $c, "USD", $r->{_eid_gdax}, $res->[2]{last},
-                     $res->[2]{high}, $res->[2]{low}, $res->[2]{volume},
+
+            # sanity checks
+            unless (@{ $res->[2]{asks} }) {
+                log_warn "No asks for $c-USD on GDAX, skipping GDAX";
+                last CHECK_GDAX;
+            }
+            unless (@{ $res->[2]{bids} }) {
+                log_warn "No bids for $c-USD on GDAX, skipping GDAX";
+                last CHECK_GDAX;
+            }
+
+            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
+                     $time, $c, "USD", $res->[2]{asks}[0], $r->{_eid_gdax},
                  );
-            $prices{$r->{_eid_gdax}} = $res->[2]{last};
-            $vols  {$r->{_eid_gdax}} = $res->[2]{volume} * $res->[2]{last};
+            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
+                     $time, "USD", $c, $res->[2]{bids}[0], $r->{_eid_gdax},
+                 );
+
+            $asks{$r->{_eid_gdax}} = $res->[2]{asks};
+            $bids{$r->{_eid_gdax}} = $res->[2]{bids};
+
         } # CHECK_GDAX
 
       CHECK_BTCID:
         {
-            my $time = time();
-            log_trace "Checking $c-IDR price on Bitcoin Indonesia ...";
+            my $time;
+
+            $time = time();
+            log_trace "Getting $c-IDR order book on BTCID ...";
             my $res;
-            eval { $res = $r->{_btcid}->get_ticker(pair => lc("${c}_idr"))->{ticker} };
+            eval { $res = $r->{_btcid}->get_depth(pair => lc($c)."_idr") };
             if ($@) {
-                log_error "Died when checking $c-IDR price on Bitcoin Indonesia: $@, skipping $c";
-                next CURRENCY;
+                log_error "Died when getting $c-IDR order book on BTCID: $@, skipping BTCID";
+                last CHECK_BTCID;
             }
-            log_trace "$c-IDR ticker on Bitcoin Indonesia: %s", $res;
-            my $volkey = "vol_".lc($c);
-            if (!$res->{high} || !$res->{low} || !$res->{last} || !$res->{$volkey}) {
-                log_error "One or more of high/low/last/$volkey is zero/empty, skipping $c";
-                next CURRENCY;
+            unless ($res->[0] == 200) {
+                log_error "Couldn't get $c-IDR order book on BTCID: $res->[0] - $res->[1], skipping BTCID";
+                last CHECK_BTCID;
             }
-            $dbh->do("INSERT INTO price (time,currency1,currency2,exchange_id,price, high,low,vol24h) VALUES (?,?,?,?,?, ?,?,?)", {},
-                     $time, $c, "IDR", $r->{_eid_btcid}, $res->{last},
-                     $res->{high}, $res->{low}, $res->{$volkey},
+            # log_trace "$c-IDR order book on BTCID: %s", $res->[2]; # too much info to log
+
+            # convert all fiat prices to USD
+            for (@{ $res->[2]{sell} }, @{ $res->[2] }{buy}) {
+                $_->[0] *= $r->{_fxrates}{IDR_USD};
+            }
+
+            # sanity checks
+            unless (@{ $res->[2]{sell} }) {
+                log_warn "No asks for $c-IDR on BTCID, skipping BTCID";
+                last CHECK_BTCID;
+            }
+            unless (@{ $res->[2]{buy} }) {
+                log_warn "No bids for $c-IDR on BTCID, skipping BTCID";
+                last CHECK_BTCID;
+            }
+
+            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
+                     $time, $c, "USD", $res->[2]{sell}[0], $r->{_eid_btcid},
                  );
-            $prices{$r->{_eid_btcid}} = $res->{last} * $r->{_fxrates}{IDR_USD};
-            $vols  {$r->{_eid_btcid}} = $res->{$volkey} * $res->{last} * $r->{_fxrates}{IDR_USD};
+            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
+                     $time, "USD", $c, $res->[2]{buy}[0], $r->{_eid_btcid},
+                 );
+
+            $asks{$r->{_eid_btcid}} = $res->[2]{sell};
+            $bids{$r->{_eid_btcid}} = $res->[2]{buy};
+
         } # CHECK_BTCID
 
-        # calculate arbitrage possibility
-        my @diffs;
-        {
-            my %seen;
-            for my $eid1 (sort {$a<=>$b} keys %prices) {
-                for my $eid2 (sort {$a<=>$b} keys %prices) {
-                    next if $eid1 == $eid2;
-                    next if $seen{"$eid1-$eid2"}++;
-                    my $price1 = $prices{$eid1};
-                    my $price2 = $prices{$eid2};
-                    my $lower  = $price1 < $price2 ? $price1 : $price2;
-                    push @diffs, {
-                        exchange1 => $r->{_exchanges}{$eid1},
-                        exchange2 => $r->{_exchanges}{$eid2},
-                        price1    => $price1,
-                        price2    => $price2,
-                        vol1      => $volumes{$eid1};
-                        vol2      => $volumes{$eid2};
-                        diff      => abs($price1-$price2),
-                        diff_pct  => sprintf "%.2f", ($price1-$price2)/$lower * 100,
-                    };
-                }
-            }
-            log_trace "Price differences: %s", \@diffs;
+        if (keys(%bids) < 2) {
+            log_debug "There are less than two exchanges that offer bids for $c-USD, skipping this round";
+            next CURRENCY;
         }
+        if (keys(%asks) < 2) {
+            log_debug "There are less than two exchanges that offer asks for $c-USD, skipping this round";
+            next CURRENCY;
+        }
+
+        # XXX dummy, use real balances
+        my %balances_cur; # key = exchange id, value = amount of currency
+        my %balances_usd; # key = exchange id, value = amount of USD
+        %balances_cur = (
+            $r-{_eid_gdax}  => 999999999,
+            $r-{_eid_btcid} => 999999999,
+        );
+        %balances_usd = (
+            $r-{_eid_gdax}  => 999999999,
+            $r-{_eid_btcid} => 999999999,
+        );
+
+        # merge all bids from all exchanges, sort from highest price
+        my @all_bids;
+        for my $eid (keys %bids) {
+            for my $item (@{ $bids{$eid} }) {
+                push @all_bids, [$eid, @$item];
+            }
+        }
+        @all_bids = sort { $b->[1] <=> $a->[1] } @all_bids;
+
+        # merge all asks from all exchanges, sort from lowest price
+        my @all_asks;
+        for my $eid (keys %asks) {
+            for my $item (@{ $asks{$eid} }) {
+                push @all_asks, [$eid, @$item];
+            }
+        }
+        @all_asks = sort { $a->[1] <=> $b->[1] } @all_asks;
+
+        my $num_order_pairs;
+      ARBITRAGE:
+        {
+            last unless @all_bids;
+            my $eid1 = $all_bids[0][0];
+            my $p1 = $all_bids[0][1];
+            my $nett_p1 = $p1 * (1 - $fees_pct{$eid1}/100);
+
+            last unless @all_asks;
+            my $i2 = 0;
+            while ($i2 < @all_asks) {
+                my $eid2 = $all_asks[$i2][0];
+                if ($eid1 == $eid2) {
+                    $i2++; next;
+                }
+                my $p2 = $all_asks[$i2][1];
+                my $nett_p2 = $p2 * (1 + $fees_pct{$eid1}/100);
+
+                # check if selling X currency at p1 on E1 while buying X
+                # currency at p2 is profitable enough
+                my $nett_p_smaller = $nett_p1 < $nett_p2 ? $nett_p1 : $nett_p2;
+                my $nett_pdiff_pct = ($nett_p1 - $nett_p2) / $nett_p_smaller * 100;
+
+                if ($net_pdiff_pct <= $r->{args}{min_price_difference_percentage}) {
+                    last ARBITRAGE;
+                }
+
+                log_trace "Would net profit %.3f%% by selling %s on %s at %.3f USD ".
+                    "and buying on %s at %.3f USD",
+                    $nett_pdiff_pct, $c,
+                    $r->{_exchanges}{$eid1}, $p1,
+                    $r->{_exchanges}{$eid2}, $p2,
+                    ;
+
+            }
+        } # ARBITRAGE
 
     } # for currency
 
     [200];
 }
 
-$SPEC{app} = {
+$SPEC{arbit} = {
     v => 1.1,
     summary => 'A cryptocurrency arbitrage script',
     args => {
@@ -406,22 +508,68 @@ $SPEC{app} = {
             default => 4*3600,
             tags => ['category:timing'],
         },
-        order_timeout => {
+        max_order_age => {
             summary => 'How long should we wait for orders to be completed '.
                 'before cancelling them (in seconds)',
             schema => 'posint*',
             default => 2*60,
             tags => ['category:timing'],
+            descripiton => <<'_',
+
+Sometimes because of rapid trading and price movement, our order might not be
+filled immediately. This setting sets a limit on how long should an order be
+left open. After this limit is reached, we cancel the order. The imbalance of
+the arbitrage transaction will be recorded.
+
+_
         },
-        arbitrage_threshold_percentage => {
+        min_price_difference_percentage => {
+            summary => 'What minimum percentage of price difference should '.
+                'trigger an arbitrage transaction',
             schema => 'float*',
+            description => <<'_',
+
+Below this percentage number, price difference will be recorded in the database
+but will be ignored (not acted upon). Note that the price difference that will
+be considered is the *net* price difference (after subtracted by trading fees).
+
+See also: `order_max_amount`.
+
+_
+            tags => ['category:profit-setting'],
         },
+        max_order_amount => {
+            summary => 'What is the maximum amount of a single order (in USD)',
+            schema => 'float*',
+            default => 100,
+            description => <<'_',
+
+A single order will be limited to not be above this value (in USD). This is the
+amount for the selling (because an arbitrage transaction is comprised of a pair
+of orders, where one order is a selling order at a higher USD amount than the
+buying order).
+
+Note that order amount can also be smaller due to: 1) insufficient demand (when
+selling) or supply (when buying) in the order book; 2) insufficient balance of
+the inventory.
+
+_
+            tags => ['category:trading'],
+        },
+
+        #TODO:
+        #base_fiat_currency => {
+        #    schema => 'currency::code*',
+        #    default => 'USD',
+        #    tags => ['category:fiat'],
+        #},
+
     },
     features => {
         dry_run => 1,
     },
 };
-sub app {
+sub arbit {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
