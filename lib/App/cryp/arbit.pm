@@ -453,6 +453,8 @@ sub _check_prices {
             last unless @all_bids;
             my $eid1 = $all_bids[0][0];
             my $p1 = $all_bids[0][1];
+            my $amount1_cur = $all_bids[0][2];
+            my $amount1_usd = $amount1_cur * $p1;
             my $nett_p1 = $p1 * (1 - $fees_pct{$eid1}/100);
 
             last unless @all_asks;
@@ -463,7 +465,9 @@ sub _check_prices {
                     $i2++; next;
                 }
                 my $p2 = $all_asks[$i2][1];
-                my $nett_p2 = $p2 * (1 + $fees_pct{$eid1}/100);
+                my $amount2_cur = $all_asks[$i2][2];
+                my $amount2_usd = $amount2_cur * $p2;
+                my $nett_p2 = (1-$p2 * (1 + $fees_pct{$eid1}/100);
 
                 # check if selling X currency at p1 on E1 while buying X
                 # currency at p2 is profitable enough
@@ -472,6 +476,20 @@ sub _check_prices {
 
                 if ($net_pdiff_pct <= $r->{args}{min_price_difference_percentage}) {
                     last ARBITRAGE;
+                }
+
+                my $balance1_cur = $balances_cur{$eid1};
+                my $balance2_usd = $balances_usd{$eid2};
+
+                # first, pick the lesser of the amount
+                my $amount_cur = $amount1_cur <= $amount2_cur ? $amount1_cur : $amount2_cur;
+
+                # second, reduce if selling balance doesn't suffice
+                if ($balances_cur{$eid1} < $amount_cur) {
+                    $amount_cur = $balances_cur{$eid1};
+                }
+                if ($balances_usd{$eid1} < $amount_cur * $nett_p2) {
+
                 }
 
                 log_trace "Would net profit %.3f%% by selling %s on %s at %.3f USD ".
