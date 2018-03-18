@@ -451,11 +451,14 @@ sub _check_prices {
       ARBITRAGE:
         {
             last unless @all_bids;
-            my $eid1 = $all_bids[0][0];
-            my $p1 = $all_bids[0][1];
-            my $amount1_cur = $all_bids[0][2];
-            my $amount1_usd = $amount1_cur * $p1;
-            my $nett_p1 = $p1 * (1 - $fees_pct{$eid1}/100);
+
+            # let's take a look at the highest bidder that we can sell to
+            my $eid_bid = $all_bids[0][0];
+            my $p_bid   = $all_bids[0][1];
+            my $amount_bid_cur = $all_bids[0][2];
+            my $amount_bid_usd = $amount_bid_cur * $p_bid;
+            # after subtracted by fees,
+            my $nett_p_bid = $p_bid * (1 - $fees_pct{$eid_bid}/100);
 
             last unless @all_asks;
             my $i2 = 0;
