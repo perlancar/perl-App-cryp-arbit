@@ -37,30 +37,56 @@ our %args_db = (
 );
 
 our $db_schema_spec = {
+    component_name => 'cryp_arbit',
     latest_v => 1,
+    provides => [qw/exchange account balance tx price order_pair/],
     install => [
+        # XXX later move to cryp-folio?
         'CREATE TABLE exchange (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              shortname VARCHAR(8) NOT NULL, UNIQUE(shortname),
              safename VARCHAR(100) NOT NULL, UNIQUE(safename)
          )',
+
+        # XXX later move to cryp-folio?
         'CREATE TABLE account (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              ctime DOUBLE NOT NULL,
              exchange_id INT NOT NULL,
              note VARCHAR(255)
          )',
+
+        # XXX later move to cryp-folio?
+        'CREATE TABLE balance (
+             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+             time DOUBLE NOT NULL, INDEX(time),
+             account_id INT NOT NULL,
+             currency VARCHAR(10) NOT NULL,
+             amount DECIMAL(21,8) NOT NULL,
+             note VARCHAR(255)
+         )',
+
+        # XXX create balance_Log? (later move to cryp-folio)?
+
+        # XXX later move to cryp-folio?
+        'CREATE TABLE tx (
+             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+             time DOUBLE NOT NULL, INDEX(time),
+             note VARCHAR(255)
+         )',
+
+        # XXX later move to cryp-folio
         'CREATE TABLE price (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              time DOUBLE NOT NULL, INDEX(time),
              currency1 VARCHAR(10) NOT NULL,
              currency2 VARCHAR(10) NOT NULL,
              price DECIMAL(21,8) NOT NULL, -- price to buy currency1 in currency2, e.g. currency1 = BTC, currency2 = USD, price = 11150
-             exchange_id INT,              -- either set this...
-             place VARCHAR(10),            -- ...or fill this e.g. "klikbca"
+             exchange_id INT NOT NULL,
              note VARCHAR(255)
          )',
-        'CREATE TABLE `orderpair` (
+
+        'CREATE TABLE order_pair (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              ctime DOUBLE NOT NULL, INDEX(ctime), -- create time in our database
 
@@ -93,27 +119,13 @@ our $db_schema_spec = {
          )',
 
         # XXX order_log (change of status)
-        'CREATE TABLE tx (
-             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             time DOUBLE NOT NULL, INDEX(time),
-             note VARCHAR(255)
-         )',
-        'CREATE TABLE profit (
+        'CREATE TABLE arbit_profit (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              time DOUBLE NOT NULL, INDEX(time),
              currency VARCHAR(10) NOT NULL,
              amount DECIMAL(21,8) NOT NULL,
              note VARCHAR(255)
          )',
-        'CREATE TABLE balance (
-             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             time DOUBLE NOT NULL, INDEX(time),
-             account_id INT NOT NULL,
-             currency VARCHAR(10) NOT NULL,
-             amount DECIMAL(21,8) NOT NULL,
-             note VARCHAR(255)
-         )',
-        # XXX balance_log (change of balances)
     ],
 };
 
@@ -142,7 +154,7 @@ sub _init {
         my $time = time();
 
         $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('GDAX','gdax')");
-        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('VIP','bitcoin-indonesia')");
+        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('INDODAX','bitcoin-indonesia')");
         my ($eid_gdax)  = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='gdax'");
         my ($eid_btcid) = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='bitcoin-indonesia'");
         $r->{_eid_gdax}  = $eid_gdax;
@@ -195,326 +207,18 @@ sub _init {
     [200];
 }
 
-sub _update_exchange_rates {
-    my $r = shift;
-
-    my $dbh = $r->{_dbh};
-
-    my $time = time();
-    my $freq = $r->{args}{check_exchange_rate_frequency};
-
-    my ($time_usd_idr, $price_usd_idr) = $dbh->selectrow_array(
-        "SELECT time, price FROM price WHERE time >= ? AND currency1='USD' AND currency2='IDR' ORDER BY time DESC LIMIT 1", {}, $time - $freq);
-    my ($time_idr_usd, $price_idr_usd) = $dbh->selectrow_array(
-        "SELECT time, price FROM price WHERE time >= ? AND currency1='IDR' AND currency2='USD' ORDER BY time DESC LIMIT 1", {}, $time - $freq);
-
-    my ($old_price_usd_idr) = $dbh->selectrow_array(
-        "SELECT time, price FROM price WHERE time >= ? AND currency1='USD' AND currency2='IDR' ORDER BY time DESC LIMIT 1", {}, $time - 3*$freq);
-    my ($old_price_idr_usd) = $dbh->selectrow_array(
-        "SELECT time, price FROM price WHERE time >= ? AND currency1='IDR' AND currency2='USD' ORDER BY time DESC LIMIT 1", {}, $time - 3*$freq);
-
-  TRY:
-    {
-        last if $time_usd_idr && $time_usd_idr;
-
-      TRY_KLIKBCA:
-        {
-            require Finance::Currency::Convert::KlikBCA;
-            log_trace "Getting USD-IDR exchange rate from KlikBCA ...";
-            my $res = Finance::Currency::Convert::KlikBCA::get_currencies();
-            unless ($res->[0] == 200) {
-                log_warn "Couldn't get exchange rate from KlikBCA: $res->[0] - $res->[1]";
-                last TRY_KLIKBCA;
-            }
-            my ($x1, $x2) = ($res->[2]{currencies}{USD}{sell_er}, $res->[2]{currencies}{USD}{buy_er});
-            if (!$x1 || !$x2) {
-                log_warn "sell_er and/or buy_er prices are zero or not found, skipping using KlikBCA prices";
-                last TRY_KLIKBCA;
-            }
-            $price_usd_idr = $x1;
-            $price_idr_usd = 1 / $x2;
-            $time_idr_usd = $time_usd_idr = $time;
-
-            log_trace "Got prices from KlikBCA: USD/IDR=%.8f, IDR/USD=%.8f", $price_usd_idr, $price_idr_usd;
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,place, note) VALUES (?,?,?,?,?, ?)", {},
-                     $time, 'USD', 'IDR', $price_usd_idr, 'KlikBCA',
-                     'sell_er',
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,place, note) VALUES (?,?,?,?,?, ?)", {},
-                     $time, 'IDR', 'USD', $price_idr_usd, 'KlikBCA',
-                     '1/buy_er',
-                 );
-
-            last TRY;
-        }
-
-      TRY_GMC:
-        {
-            require Finance::Currency::Convert::GMC;
-            log_trace "Getting USD-IDR exchange rate from GMC ...";
-            my $res = Finance::Currency::Convert::GMC::get_currencies();
-            unless ($res->[0] == 200) {
-                log_warn "Couldn't get exchange rate from GMC: $res->[0] - $res->[1]";
-                last TRY_GMC;
-            }
-            my ($x1, $x2) = ($res->[2]{currencies}{USD}{sell}, $res->[2]{currencies}{USD}{buy});
-            if (!$x1 || !$x2) {
-                log_warn "sell and/or buy prices are zero or not found, skipping using GMC prices";
-                last TRY_GMC;
-            }
-            $price_usd_idr = $x1;
-            $price_idr_usd = 1 / $x2;
-            $time_idr_usd = $time_usd_idr = $time;
-
-            log_trace "Got prices from GMC: USD/IDR=%.8f, IDR/USD=%.8f", $price_usd_idr, $price_idr_usd;
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,place, note) VALUES (?,?,?,?,?, ?)", {},
-                     $time, 'USD', 'IDR', $price_usd_idr, 'GMC',
-                     'sell',
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,place, note) VALUES (?,?,?,?,?, ?)", {},
-                     $time, 'IDR', 'USD', $price_idr_usd, 'GMC',
-                     '1/buy',
-                 );
-
-            last TRY;
-        }
-
-        if ($old_price_idr_usd && $old_price_usd_idr) {
-            log_error "Couldn't update exchange rates, continuing with old prices for now";
-            $price_usd_idr = $old_price_usd_idr;
-            $price_idr_usd = $old_price_idr_usd;
-        } else {
-            die "Couldn't update exchange rates for a while (or ever), bailing out";
-        }
-    }
-
-    $r->{_fxrates} = {
-        USD_IDR => $price_usd_idr,
-        IDR_USD => $price_idr_usd,
-    };
-
-    [200];
-}
-
-sub _arbitrage {
-    my ($r, $bids, $asks) = @_;
-
-}
-
-sub _check_prices {
-    my $r = shift;
-
-    my $dbh = $r->{_dbh};
-
-    _update_exchange_rates($r);
-
-    my @currencies = ("BTC", "BCH", "LTC", "ETH"); # XXX currently hardcoded
-  CURRENCY:
-    for my $c (@currencies) {
-        my %prices; # key = exchange_id, val = price in USD
-        my %vols  ; # key = exchange_id, val = volume in USD
-
-        my %asks; # key = exchange_id, val = [[lowest-price-in-USD , amount-of-currency], [2nd-lowest-price-in-USD , amount-of-currency], ...]
-        my %bids; # key = exchange_id, val = [[highest-price-in-USD, amount-of-currency], [2nd-highest-price-in-USD, amount-of-currency], ...]
-
-        # XXX hardcoded for now
-        my %fees_pct; # key = exchange_id, val = market taker fees
-        $fees_pct{$r->{_eid_gdax}}  = $c eq 'BTC' ? 0.25 : 0.3;
-        $fees_pct{$r->{_eid_btcid}} = 0.3;
-
-      CHECK_GDAX:
-        {
-            my $time;
-
-            $time = time();
-            log_trace "Checking $c-USD order book on GDAX ...";
-            my $res = $r->{_gdaxlite}->public_request(
-                GET => "/products/$c-USD/book?level=2",
-            );
-            unless ($res->[0] == 200) {
-                log_error "Couldn't get $c-USD order book on GDAX: $res->[0] - $res->[1], skipping GDAX";
-                last CHECK_GDAX;
-            }
-            # log_trace "$c-USD order book on GDAX: %s", $res->[2]; # too much info to log
-            for (@{ $res->[2]{asks} }, @{ $res->[2]{bids} }) {
-                $_->[1] *= $_->[2];
-                splice @$_, 2;
-            }
-
-            # sanity checks
-            unless (@{ $res->[2]{asks} }) {
-                log_warn "No asks for $c-USD on GDAX, skipping GDAX";
-                last CHECK_GDAX;
-            }
-            unless (@{ $res->[2]{bids} }) {
-                log_warn "No bids for $c-USD on GDAX, skipping GDAX";
-                last CHECK_GDAX;
-            }
-
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, $c, "USD", $res->[2]{asks}[0], $r->{_eid_gdax},
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, "USD", $c, $res->[2]{bids}[0], $r->{_eid_gdax},
-                 );
-
-            $asks{$r->{_eid_gdax}} = $res->[2]{asks};
-            $bids{$r->{_eid_gdax}} = $res->[2]{bids};
-
-        } # CHECK_GDAX
-
-      CHECK_BTCID:
-        {
-            my $time;
-
-            $time = time();
-            log_trace "Getting $c-IDR order book on BTCID ...";
-            my $res;
-            eval { $res = $r->{_btcid}->get_depth(pair => lc($c)."_idr") };
-            if ($@) {
-                log_error "Died when getting $c-IDR order book on BTCID: $@, skipping BTCID";
-                last CHECK_BTCID;
-            }
-            unless ($res->[0] == 200) {
-                log_error "Couldn't get $c-IDR order book on BTCID: $res->[0] - $res->[1], skipping BTCID";
-                last CHECK_BTCID;
-            }
-            # log_trace "$c-IDR order book on BTCID: %s", $res->[2]; # too much info to log
-
-            # convert all fiat prices to USD
-            for (@{ $res->[2]{sell} }, @{ $res->[2] }{buy}) {
-                $_->[0] *= $r->{_fxrates}{IDR_USD};
-            }
-
-            # sanity checks
-            unless (@{ $res->[2]{sell} }) {
-                log_warn "No asks for $c-IDR on BTCID, skipping BTCID";
-                last CHECK_BTCID;
-            }
-            unless (@{ $res->[2]{buy} }) {
-                log_warn "No bids for $c-IDR on BTCID, skipping BTCID";
-                last CHECK_BTCID;
-            }
-
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, $c, "USD", $res->[2]{sell}[0], $r->{_eid_btcid},
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, "USD", $c, $res->[2]{buy}[0], $r->{_eid_btcid},
-                 );
-
-            $asks{$r->{_eid_btcid}} = $res->[2]{sell};
-            $bids{$r->{_eid_btcid}} = $res->[2]{buy};
-
-        } # CHECK_BTCID
-
-        if (keys(%bids) < 2) {
-            log_debug "There are less than two exchanges that offer bids for $c-USD, skipping this round";
-            next CURRENCY;
-        }
-        if (keys(%asks) < 2) {
-            log_debug "There are less than two exchanges that offer asks for $c-USD, skipping this round";
-            next CURRENCY;
-        }
-
-        # XXX dummy, use real balances
-        my %balances_cur; # key = exchange id, value = amount of currency
-        my %balances_usd; # key = exchange id, value = amount of USD
-        %balances_cur = (
-            $r-{_eid_gdax}  => 999999999,
-            $r-{_eid_btcid} => 999999999,
-        );
-        %balances_usd = (
-            $r-{_eid_gdax}  => 999999999,
-            $r-{_eid_btcid} => 999999999,
-        );
-
-        # merge all bids from all exchanges, sort from highest price
-        my @all_bids;
-        for my $eid (keys %bids) {
-            for my $item (@{ $bids{$eid} }) {
-                push @all_bids, [$eid, @$item];
-            }
-        }
-        @all_bids = sort { $b->[1] <=> $a->[1] } @all_bids;
-
-        # merge all asks from all exchanges, sort from lowest price
-        my @all_asks;
-        for my $eid (keys %asks) {
-            for my $item (@{ $asks{$eid} }) {
-                push @all_asks, [$eid, @$item];
-            }
-        }
-        @all_asks = sort { $a->[1] <=> $b->[1] } @all_asks;
-
-        my $num_order_pairs;
-      ARBITRAGE:
-        {
-            last unless @all_bids;
-
-            # let's take a look at the highest bidder that we can sell to
-            my $eid_bid = $all_bids[0][0];
-            my $p_bid   = $all_bids[0][1];
-            my $amount_bid_cur = $all_bids[0][2];
-            my $amount_bid_usd = $amount_bid_cur * $p_bid;
-            # after subtracted by fees,
-            my $nett_p_bid = $p_bid * (1 - $fees_pct{$eid_bid}/100);
-
-            last unless @all_asks;
-            my $i2 = 0;
-            while ($i2 < @all_asks) {
-                my $eid2 = $all_asks[$i2][0];
-                if ($eid1 == $eid2) {
-                    $i2++; next;
-                }
-                my $p2 = $all_asks[$i2][1];
-                my $amount2_cur = $all_asks[$i2][2];
-                my $amount2_usd = $amount2_cur * $p2;
-                my $nett_p2 = (1-$p2 * (1 + $fees_pct{$eid1}/100);
-
-                # check if selling X currency at p1 on E1 while buying X
-                # currency at p2 is profitable enough
-                my $nett_p_smaller = $nett_p1 < $nett_p2 ? $nett_p1 : $nett_p2;
-                my $nett_pdiff_pct = ($nett_p1 - $nett_p2) / $nett_p_smaller * 100;
-
-                if ($net_pdiff_pct <= $r->{args}{min_price_difference_percentage}) {
-                    last ARBITRAGE;
-                }
-
-                my $balance1_cur = $balances_cur{$eid1};
-                my $balance2_usd = $balances_usd{$eid2};
-
-                # first, pick the lesser of the amount
-                my $amount_cur = $amount1_cur <= $amount2_cur ? $amount1_cur : $amount2_cur;
-
-                # second, reduce if selling balance doesn't suffice
-                if ($balances_cur{$eid1} < $amount_cur) {
-                    $amount_cur = $balances_cur{$eid1};
-                }
-                if ($balances_usd{$eid1} < $amount_cur * $nett_p2) {
-
-                }
-
-                log_trace "Would net profit %.3f%% by selling %s on %s at %.3f USD ".
-                    "and buying on %s at %.3f USD",
-                    $nett_pdiff_pct, $c,
-                    $r->{_exchanges}{$eid1}, $p1,
-                    $r->{_exchanges}{$eid2}, $p2,
-                    ;
-
-            }
-        } # ARBITRAGE
-
-    } # for currency
-
-    [200];
-}
-
 $SPEC{arbit} = {
     v => 1.1,
     summary => 'A cryptocurrency arbitrage script',
     args => {
         %args_db,
+        strategy => {
+            summary => 'Which strategy to use for arbitration',
+            schema => ['str*', match=>qr/\A\w+\z/],
+            default => 'merge_order_book',
+            tags => ['category:strategy'],
+        },
+
         check_prices_frequency => {
             summary => 'How many seconds to wait between checking prices '.
                 'at the cryptoexchanges (in seconds)',
@@ -535,7 +239,7 @@ $SPEC{arbit} = {
             schema => 'posint*',
             default => 2*60,
             tags => ['category:timing'],
-            descripiton => <<'_',
+            description => <<'_',
 
 Sometimes because of rapid trading and price movement, our order might not be
 filled immediately. This setting sets a limit on how long should an order be
@@ -548,6 +252,7 @@ _
             summary => 'What minimum percentage of price difference should '.
                 'trigger an arbitrage transaction',
             schema => 'float*',
+            req => 1,
             description => <<'_',
 
 Below this percentage number, price difference will be recorded in the database
@@ -595,7 +300,16 @@ sub arbit {
 
     my $r = $args{-cmdline_r};
 
+    # XXX schema
+    my $strategy = $args{strategy} // 'merge_order_book';
+
+    log_info "Starting arbitration with '%s' strategy ...", $strategy;
+
     _init($r);
+
+    my $strategy_mod = "App::cryp::arbit::Strategy::$strategy";
+    (my $strategy_modpm = "$strategy_mod.pm") =~ s!::!/!g;
+    require $strategy_modpm;
 
     while (1) {
         _check_prices($r);
@@ -612,6 +326,23 @@ sub arbit {
 =head1 SYNOPSIS
 
 Please see included script L<cryp-arbit>.
+
+
+=head1 DESCRIPTION
+
+
+=head1 INTERNAL NOTES
+
+Routines inside this module communicate with one another either using the
+database (obviously), or by putting stuffs in C<$r> (the request hash/stash) and
+pass it around. The keys that are used by routines in this module:
+
+ $r->{_dbh}
+ $r->{_exchanges}
+
+To be cleaner and more documented, when communicating with routines in other
+modules (including C<App::cryp::Arbit::Strategy::*> modules), we use standard
+argument passing.
 
 
 =head1 SEE ALSO
