@@ -14,7 +14,7 @@ use Time::HiRes qw(time);
 our %SPEC;
 
 $SPEC{':package'} = {
-    summary => 'A cryptocurrency arbitrage script',
+    summary => 'Cryptocurrency arbitrage utility',
     v => 1.1,
 };
 
@@ -132,24 +132,46 @@ our $db_schema_spec = {
 sub _init {
     my $r = shift;
 
-    require DBIx::Connect::MySQL;
-    log_trace "Connecting to database ...";
-    $r->{_dbh} = DBIx::Connect::MySQL->connect(
-        "dbi:mysql:database=$r->{args}{db_name}",
-        $r->{args}{db_username},
-        $r->{args}{db_password},
-        {RaiseError => 1},
-    );
-    my $dbh = $r->{_dbh};
+    my %acc_exchanges; # key = exchange safename, value = (account, ...)
 
-    require SQL::Schema::Versioned;
-    my $res = SQL::Schema::Versioned::create_or_update_db_schema(
-        dbh => $r->{_dbh}, spec => $db_schema_spec,
-    );
-    die "Cannot run the application: cannot create/upgrade database schema: $res->[1]"
-        unless $res->[0] == 200;
+    # check arguments
+  CHECK_ARGUMENTS:
+    {
+        # there must be at least two accounts on two different exchanges
+        return [400, "Please specify at least two accounts"]
+            unless $r->{args}{accounts} && @{ $r->{args}{accounts} } >= 2;
+        for (@{ $r->{args}{accounts} }) {
+            m!(.+)/(.+)! or return [400, "Invalid account '$_', please use EXCHANGE/ACCOUNT syntax"];
+            $acc_exchanges{$1} //= [];
+            push @{ $acc_exchanges{$1} } //= [];
+        }
+        return [400, "Please specify accounts on at least two cryptoexchanges, ".
+                    "you only specify account(s) on " . (keys %exchanges)[0]]
+            unless keys(%exchanges) >= 2;
+    }
 
-    # create exchange accounts & API clients
+  CONNECT: {
+        require DBIx::Connect::MySQL;
+        log_trace "Connecting to database ...";
+        $r->{_dbh} = DBIx::Connect::MySQL->connect(
+            "dbi:mysql:database=$r->{args}{db_name}",
+            $r->{args}{db_username},
+            $r->{args}{db_password},
+            {RaiseError => 1},
+        );
+        my $dbh = $r->{_dbh};
+    }
+
+  SETUP_SCHEMA: {
+        require SQL::Schema::Versioned;
+        my $res = SQL::Schema::Versioned::create_or_update_db_schema(
+            dbh => $r->{_dbh}, spec => $db_schema_spec,
+        );
+        die "Cannot run the application: cannot create/upgrade database schema: $res->[1]"
+            unless $res->[0] == 200;
+    }
+
+  INSTANTIATE_API_CLIENTS: {
     {
         my $time = time();
 
@@ -209,7 +231,21 @@ sub _init {
 
 $SPEC{arbit} = {
     v => 1.1,
-    summary => 'A cryptocurrency arbitrage script',
+    summary => 'Perform arbitrage',
+    description => <<'_',
+
+This utility monitors prices of several coins in several cryptoexchanges. When
+it detects a price difference for a coin (e.g. BTC) that is large enough (see
+`min_price_difference_percentage` option), it will perform buy order on the
+exchange that has the lower price (note: the account on this exchange must have
+enough base currency balance, e.g. USD if the pair is BTC/USD) and sell order on
+the exchange that has the higher price (note: the account on this exchange must
+have enough BTC balance).
+
+The balances are called inventories or your working capital. You fill and
+transfer inventories manually to refill balances and/or to collect profits.
+
+_
     args => {
         %args_db,
         strategy => {
@@ -218,7 +254,18 @@ $SPEC{arbit} = {
             default => 'merge_order_book',
             tags => ['category:strategy'],
         },
+        accounts => {
+            summary => 'Cryptoexchange accounts',
+            schema => ['array*', of=>'cryptoexchange::account', min_len=>2],
+            description => <<'_',
 
+There should at least be two accounts, with at least two different
+cryptoexchanges. If not specified, all accounts listed on the configuration file
+will be included. It's possible to include two or more accounts on the same
+cryptoexchange.
+
+_
+        },
         check_prices_frequency => {
             summary => 'How many seconds to wait between checking prices '.
                 'at the cryptoexchanges (in seconds)',
@@ -299,13 +346,12 @@ sub arbit {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
+    my $res = _init($r); return $res unless $res->[0] == 200;
 
     # XXX schema
     my $strategy = $args{strategy} // 'merge_order_book';
 
     log_info "Starting arbitration with '%s' strategy ...", $strategy;
-
-    _init($r);
 
     my $strategy_mod = "App::cryp::arbit::Strategy::$strategy";
     (my $strategy_modpm = "$strategy_mod.pm") =~ s!::!/!g;
