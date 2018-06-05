@@ -44,7 +44,7 @@ our $db_schema_spec = {
         # XXX later move to cryp-folio?
         'CREATE TABLE exchange (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             shortname VARCHAR(8) NOT NULL, UNIQUE(shortname),
+             code VARCHAR(8) NOT NULL, UNIQUE(code),
              safename VARCHAR(100) NOT NULL, UNIQUE(safename)
          )',
 
@@ -129,10 +129,41 @@ our $db_schema_spec = {
     ],
 };
 
+sub _exchange_catalog {
+    state $xcat = do {
+        require CryptoExchange::Catalog;
+        CryptoExchange::Catalog->new;
+    };
+    $xcat;
+}
+
+# XXX move to App::cryp::Util or folio? given a safename, get or assign exchange
+# numeric ID from the database
+sub _get_exchange_id {
+    my ($r, $exchange) = @_;
+
+    my $xcat = _exchange_catalog();
+    my $rec = $xcat->by_safename($exchange);
+    $rec or die "BUG: Unknown exchange '$exchange'";
+
+    my $dbh = $r->{_stash}{dbh};
+
+    my ($id) = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename=?", {}, $exchange);
+
+    unless ($id) {
+        $dbh->do("INSERT INTO exchange (code,safename) VALUES (?,?)", {}, $rec->{code}, $exchange);
+        $id = $dbh->last_insert_id("","","","");
+    }
+
+    $id;
+}
+
 sub _init {
     my $r = shift;
 
-    my %acc_exchanges; # key = exchange safename, value = (account, ...)
+    my %acc_exchanges; # key = exchange safename, value = {account1=>1, account2=>1, ...)
+
+    my $xcat = _exchange_catalog();
 
     # check arguments
   CHECK_ARGUMENTS:
@@ -142,89 +173,77 @@ sub _init {
             unless $r->{args}{accounts} && @{ $r->{args}{accounts} } >= 2;
         for (@{ $r->{args}{accounts} }) {
             m!(.+)/(.+)! or return [400, "Invalid account '$_', please use EXCHANGE/ACCOUNT syntax"];
-            $acc_exchanges{$1} //= [];
-            push @{ $acc_exchanges{$1} } //= [];
+            my ($xchg, $acc) = ($1, $2);
+            unless (exists $acc_exchanges{$xchg}) {
+                my $rec = $xcat->by_safename($xchg);
+                return [400, "Unknown exchange '$xchg'"] unless $rec;
+                return [400, "Exchange '$xchg' is not assigned short code yet. ".
+                            "please contact the maintainer of CryptoExchange::Catalog ".
+                            "to add one for it"] unless $rec->{code};
+            }
+            $acc_exchanges{$xchg}{$acc} = 1;
         }
-        return [400, "Please specify accounts on at least two cryptoexchanges, ".
-                    "you only specify account(s) on " . (keys %exchanges)[0]]
-            unless keys(%exchanges) >= 2;
+        return [400, "Please specify accounts on at least two ".
+                    "cryptoexchanges, you only specify account(s) on " .
+                    join(", ", keys %acc_exchanges)]
+            unless keys(%acc_exchanges) >= 2;
+        $r->{_stash}{acc_exchanges} = \%acc_exchanges;
     }
 
-  CONNECT: {
+    my $dbh;
+  CONNECT:
+    {
         require DBIx::Connect::MySQL;
         log_trace "Connecting to database ...";
-        $r->{_dbh} = DBIx::Connect::MySQL->connect(
+        $r->{_stash}{dbh} = DBIx::Connect::MySQL->connect(
             "dbi:mysql:database=$r->{args}{db_name}",
             $r->{args}{db_username},
             $r->{args}{db_password},
             {RaiseError => 1},
         );
-        my $dbh = $r->{_dbh};
+        $dbh = $r->{_stash}{dbh};
     }
 
-  SETUP_SCHEMA: {
+  SETUP_SCHEMA:
+    {
         require SQL::Schema::Versioned;
         my $res = SQL::Schema::Versioned::create_or_update_db_schema(
-            dbh => $r->{_dbh}, spec => $db_schema_spec,
+            dbh => $r->{_stash}{dbh}, spec => $db_schema_spec,
         );
         die "Cannot run the application: cannot create/upgrade database schema: $res->[1]"
             unless $res->[0] == 200;
     }
 
-  INSTANTIATE_API_CLIENTS: {
+  INSTANTIATE_EXCHANGE_CLIENTS:
     {
         my $time = time();
 
-        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('GDAX','gdax')");
-        $dbh->do("INSERT IGNORE INTO exchange (shortname,safename) VALUES ('INDODAX','bitcoin-indonesia')");
-        my ($eid_gdax)  = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='gdax'");
-        my ($eid_btcid) = $dbh->selectrow_array("SELECT id FROM exchange WHERE safename='bitcoin-indonesia'");
-        $r->{_eid_gdax}  = $eid_gdax;
-        $r->{_eid_btcid} = $eid_btcid;
+        for my $exchange (sort keys %acc_exchanges) {
 
-        unless ($r->{_cryp}{exchanges}{gdax}{default}) {
-            die "Please specify [exchange/gdax] section in configuration";
-        }
-        my ($aid_gdax)  = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_gdax  AND note='default'");
-        if (!$aid_gdax) {
-            $dbh->do("INSERT INTO account (ctime, exchange_id, note) VALUES (?,?,?)", {}, $time, $eid_gdax, 'default');
-            ($aid_gdax) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_gdax  AND note='default'");
-            $r->{_aid_gdax}  = $aid_gdax;
-        }
-        if (!$r->{_gdaxlite}) {
-            require Finance::GDAX::Lite;
-            $r->{_gdaxlite} = Finance::GDAX::Lite->new(
-                key        => $r->{_cryp}{exchanges}{gdax}{default}{key},
-                secret     => $r->{_cryp}{exchanges}{gdax}{default}{secret},
-                passphrase => $r->{_cryp}{exchanges}{gdax}{default}{passphrase},
-            );
-        }
+            my $mod = "App::cryp::Exchange::$exchange";
+            $mod =~ s/-/_/g;
+            (my $modpm = "$mod.pm") =~ s!::!/!g;
+            require $modpm;
 
-        unless ($r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}) {
-            die "Please specify [bitcoin-indonesia/gdax] section in configuration";
-        }
-        my ($aid_btcid) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_btcid AND note='default'");
-        if (!$aid_btcid) {
-            $dbh->do("INSERT INTO account (ctime, exchange_id, note) VALUES (?,?,?)", {}, $time, $eid_btcid, 'default');
-            ($aid_btcid) = $dbh->selectrow_array("SELECT id FROM account WHERE exchange_id=$eid_btcid  AND note='default'");
-            $r->{_aid_btcid} = $aid_btcid;
-        }
-        if (!$r->{_btcid}) {
-            require Finance::BTCIndo;
-            $r->{_btcid} = Finance::BTCIndo->new(
-                key        => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{key},
-                secret     => $r->{_cryp}{exchanges}{'bitcoin-indonesia'}{default}{secret},
-            );
-        }
+            my $accounts = $acc_exchanges{$exchange};
+            for my $account (sort keys %$accounts) {
+                # assign an ID to the exchange, if not already so
+                my $eid = _get_exchange_id($r, $exchange);
+                $r->{_stash}{exchange_ids}{$exchange} = $eid;
 
-        my $sth = $dbh->prepare("SELECT id, shortname FROM exchange");
-        $sth->execute;
-        my %exchanges;
-        while (my $row = $sth->fetchrow_hashref) {
-            $exchanges{$row->{id}} = $row->{shortname};
-        }
-        $r->{_exchanges} = \%exchanges;
-    }
+                unless ($r->{_cryp}{exchanges}{$exchange}{$account}) {
+                    return [400, "No configuration found for exchange $exchange (account $account). ".
+                                "Please specify [exchange/$exchange/$account] section in configuration"];
+                }
+                my $client = $mod->new(
+                    %{ $r->{_cryp}{exchanges}{$exchange}{$account} }
+                );
+                $r->{_stash}{exchange_clients}{$exchange}{$account} = $client;
+            } # account
+        } # exchange
+    } # INSTANTIATE_EXCHANGE_CLIENTS
+
+    use DD; dd $r->{_stash};
 
     [200];
 }
@@ -379,12 +398,24 @@ Please see included script L<cryp-arbit>.
 
 =head1 INTERNAL NOTES
 
+The cryp app family uses L<Perinci::CmdLine::cryp> which puts cryp-specific
+information from the configuration into the $r->{_cryp} hash:
+
+ $r->{_cryp}
+   {arbit_strategies}  # from [arbit-strategy/XXX] config sections
+   {exchanges}         # from [exchange/XXX(/YYY)?] config sections
+   {masternodes}       # from [masternode/XXX(/YYY)?] config sections
+   {wallet}            # from [wallet/COIN]
+
 Routines inside this module communicate with one another either using the
 database (obviously), or by putting stuffs in C<$r> (the request hash/stash) and
-pass it around. The keys that are used by routines in this module:
+passing C<$r> around. The keys that are used by routines in this module:
 
- $r->{_dbh}
- $r->{_exchanges}
+ $r->{_stash}
+   {dbh}
+   {acc_exchanges}     # key=exchange safename, value={account1 => 1, ...}
+   {exchange_clients}  # key=exchange safename, value={account1 => $client1, ...}
+   {exchange_ids}      # key=exchange safename, value=exchange (numeric) ID from db
 
 To be cleaner and more documented, when communicating with routines in other
 modules (including C<App::cryp::Arbit::Strategy::*> modules), we use standard
