@@ -17,6 +17,7 @@ Perinci::CmdLine::cryp->new(
     pass_cmdline_object => 1,
     config_filename => ["cryp.conf", "cryp-arbit.conf"],
     subcommands => {
+        "dump-cryp-config" => { url=>"${prefix}dump_cryp_config" },
         arbit => { url=>"${prefix}arbit" },
     },
 )->run;
