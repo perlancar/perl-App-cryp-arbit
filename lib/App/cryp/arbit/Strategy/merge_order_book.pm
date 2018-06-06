@@ -6,239 +6,245 @@ package App::cryp::arbit::Strategy::merge_order_book;
 use 5.010001;
 use strict;
 use warnings;
+use Log::ger;
+
+use Finance::Currency::FiatX;
 
 use Role::Tiny::With;
 
 with 'App::cryp::Role::ArbitStrategy';
 
 sub create_order_pairs {
-    my %args = @_;
+    my ($pkg, %args) = @_;
 
-    my $res;
+    my $r = $args{r};
+    my $dbh = $r->{_stash}{dbh};
 
+    #my $accbals = App::cryp::arbit::_get_account_balances($r);
 
+    my @order_pairs;
 
+  COIN:
+    for my $coin (@{ $r->{_stash}{coins} }) {
+        log_info "Listing orderbooks for coin %s ...", $coin;
 
-
-
-
-    sub _check_prices {
-    my $r = shift;
-
-    my $dbh = $r->{_dbh};
-
-    _update_exchange_rates($r);
-
-    my @currencies = ("BTC", "BCH", "LTC", "ETH"); # XXX currently hardcoded
-  CURRENCY:
-    for my $c (@currencies) {
         my %prices; # key = exchange_id, val = price in USD
         my %vols  ; # key = exchange_id, val = volume in USD
 
-        my %asks; # key = exchange_id, val = [[lowest-price-in-USD , amount-of-currency], [2nd-lowest-price-in-USD , amount-of-currency], ...]
-        my %bids; # key = exchange_id, val = [[highest-price-in-USD, amount-of-currency], [2nd-highest-price-in-USD, amount-of-currency], ...]
+        my %sells; # key = exchange_id, val = [[lowest-price-in-USD , amount-of-coin, orig-fiat-currency, price-in-orig-fiat-currency], [2nd-lowest-price-in-USD , amount-of-currency, ...], ...]
+        my %buys ; # key = exchange_id, val = [[highest-price-in-USD, amount-of-coin, orig-fiat-currency, price-in-orig-fiat-currency], [2nd-highest-price-in-USD, amount-of-currency, ...], ...]
 
-        # XXX hardcoded for now
-        my %fees_pct; # key = exchange_id, val = market taker fees
-        $fees_pct{$r->{_eid_gdax}}  = $c eq 'BTC' ? 0.25 : 0.3;
-        $fees_pct{$r->{_eid_btcid}} = 0.3;
+        # get order books
+      EXCHANGE:
+        for my $exchange (sort keys %{ $r->{_stash}{exchange_clients} }) {
+            my $eid = App::cryp::arbit::_get_exchange_id($r, $exchange);
+            my $clients = $r->{_stash}{exchange_clients}{$exchange};
+            my $client = $clients->{ (sort keys %$clients)[0] };
 
-      CHECK_GDAX:
-        {
-            my $time;
+          PAIR:
+            my $pairs = $r->{_stash}{exchange_pairs}{$exchange};
+            for my $pair (@$pairs) {
+                my ($cur1, $cur2) = split m!/!, $pair;
+                next unless $cur1 eq $coin;
+                next unless App::cryp::arbit::_is_fiat($cur2);
+                if ($r->{args}{fiats}) {
+                    next unless grep { $_ eq $cur2 } @{ $r->{args}{fiats} };
+                }
 
-            $time = time();
-            log_trace "Checking $c-USD order book on GDAX ...";
-            my $res = $r->{_gdaxlite}->public_request(
-                GET => "/products/$c-USD/book?level=2",
-            );
-            unless ($res->[0] == 200) {
-                log_error "Couldn't get $c-USD order book on GDAX: $res->[0] - $res->[1], skipping GDAX";
-                last CHECK_GDAX;
-            }
-            # log_trace "$c-USD order book on GDAX: %s", $res->[2]; # too much info to log
-            for (@{ $res->[2]{asks} }, @{ $res->[2]{bids} }) {
-                $_->[1] *= $_->[2];
-                splice @$_, 2;
-            }
+                my $time = time();
+                log_debug "Getting orderbook %s on %s ...", $pair, $exchange;
+                my $res = $client->get_order_book(pair => $pair);
+                unless ($res->[0] == 200) {
+                    log_error "Couldn't get orderbook %s on %s: %s, skipping this pair",
+                        $pair, $exchange, $res;
+                    next PAIR;
+                }
+                #log_trace "orderbook %s on %s: %s", $pair, $exchange, $res->[2]; # too much info to log
 
-            # sanity checks
-            unless (@{ $res->[2]{asks} }) {
-                log_warn "No asks for $c-USD on GDAX, skipping GDAX";
-                last CHECK_GDAX;
-            }
-            unless (@{ $res->[2]{bids} }) {
-                log_warn "No bids for $c-USD on GDAX, skipping GDAX";
-                last CHECK_GDAX;
-            }
+                # sanity checks
+                unless (@{ $res->[2]{sell} }) {
+                    log_warn "No sell orders for %s on %s, skipping this pair",
+                        $pair, $exchange;
+                    next PAIR;
+                }
+                unless (@{ $res->[2]{buy} }) {
+                    log_warn "No buy orders for %s on %s, skipping this pair",
+                        $pair, $exchange;
+                    last PAIR;
+                }
 
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, $c, "USD", $res->[2]{asks}[0], $r->{_eid_gdax},
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, "USD", $c, $res->[2]{bids}[0], $r->{_eid_gdax},
-                 );
+                # convert fiat to USD
+                unless ($cur2 eq 'USD') {
+                    my ($fxrate_buy, $fxrate_sell);
 
-            $asks{$r->{_eid_gdax}} = $res->[2]{asks};
-            $bids{$r->{_eid_gdax}} = $res->[2]{bids};
+                    my $cbuyres  = Finance::Currency::FiatX::convert_fiat_currency(
+                        amount => 1, from => $cur2, to => 'USD', dbh => $dbh, type => 'buy');
+                    if ($cbuyres->[0] != 200) {
+                        log_error "Couldn't get conversion rate (buy) from %s to USD, skipping this pair",
+                            $cur2;
+                        next PAIR;
+                    }
+                    $fxrate_buy = $cbuyres->[2];
 
-        } # CHECK_GDAX
+                    my $csellres = Finance::Currency::FiatX::convert_fiat_currency(
+                        amount => 1, from => $cur2, to => 'USD', dbh => $dbh, type => 'sell');
+                    if ($csellres->[0] != 200) {
+                        log_error "Couldn't get conversion rate (sell) from %s to USD, skipping this pair",
+                            $cur2;
+                        next PAIR;
+                    }
+                    $fxrate_sell = $csellres->[2];
 
-      CHECK_BTCID:
-        {
-            my $time;
+                    log_debug "Will be using these conversion rates from %s to USD: buy=%.4f, sell=%.4f",
+                        $cur2, $fxrate_buy, $fxrate_sell;
 
-            $time = time();
-            log_trace "Getting $c-IDR order book on BTCID ...";
-            my $res;
-            eval { $res = $r->{_btcid}->get_depth(pair => lc($c)."_idr") };
-            if ($@) {
-                log_error "Died when getting $c-IDR order book on BTCID: $@, skipping BTCID";
-                last CHECK_BTCID;
-            }
-            unless ($res->[0] == 200) {
-                log_error "Couldn't get $c-IDR order book on BTCID: $res->[0] - $res->[1], skipping BTCID";
-                last CHECK_BTCID;
-            }
-            # log_trace "$c-IDR order book on BTCID: %s", $res->[2]; # too much info to log
+                    for my $rec (@{ $res->[2]{buy} }) {
+                        $rec->[2]  = $cur2;
+                        $rec->[3]  = $rec->[0];
+                        $rec->[0] *= $fxrate_buy;
+                    }
+                    for my $rec (@{ $res->[2]{sell} }) {
+                        $rec->[2]  = $cur2;
+                        $rec->[3]  = $rec->[0];
+                        $rec->[0] *= $fxrate_sell;
+                    }
+                } # convert fiat currency
 
-            # convert all fiat prices to USD
-            for (@{ $res->[2]{sell} }, @{ $res->[2] }{buy}) {
-                $_->[0] *= $r->{_fxrates}{IDR_USD};
-            }
+                $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
+                         $time, $coin, "USD", $res->[2]{buy}[0][0], $eid, "buy");
+                $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
+                         $time, $coin, "USD", $res->[2]{sell}[0][0], $eid, "sell");
 
-            # sanity checks
-            unless (@{ $res->[2]{sell} }) {
-                log_warn "No asks for $c-IDR on BTCID, skipping BTCID";
-                last CHECK_BTCID;
-            }
-            unless (@{ $res->[2]{buy} }) {
-                log_warn "No bids for $c-IDR on BTCID, skipping BTCID";
-                last CHECK_BTCID;
-            }
+                push @{ $sells{$exchange} }, @{ $res->[2]{sell} };
+                push @{ $buys {$exchange} }, @{ $res->[2]{buy}  };
+            } # for pair
+        } # for exchange
 
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, $c, "USD", $res->[2]{sell}[0], $r->{_eid_btcid},
-                 );
-            $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id) VALUES (?,?,?,?,?)", {},
-                     $time, "USD", $c, $res->[2]{buy}[0], $r->{_eid_btcid},
-                 );
-
-            $asks{$r->{_eid_btcid}} = $res->[2]{sell};
-            $bids{$r->{_eid_btcid}} = $res->[2]{buy};
-
-        } # CHECK_BTCID
-
-        if (keys(%bids) < 2) {
-            log_debug "There are less than two exchanges that offer bids for $c-USD, skipping this round";
-            next CURRENCY;
+        if (keys(%buys) < 2) {
+            log_info "There are less than two exchanges that offer buys for %s, ".
+                "skipping this coin";
+            next COIN;
         }
-        if (keys(%asks) < 2) {
-            log_debug "There are less than two exchanges that offer asks for $c-USD, skipping this round";
+        if (keys(%sells) < 2) {
+            log_debug "There are less than two exchanges that offer asks for %s, skipping this round";
             next CURRENCY;
         }
 
-        # XXX dummy, use real balances
-        my %balances_cur; # key = exchange id, value = amount of currency
-        my %balances_usd; # key = exchange id, value = amount of USD
-        %balances_cur = (
-            $r-{_eid_gdax}  => 999999999,
-            $r-{_eid_btcid} => 999999999,
-        );
-        %balances_usd = (
-            $r-{_eid_gdax}  => 999999999,
-            $r-{_eid_btcid} => 999999999,
-        );
-
-        # merge all bids from all exchanges, sort from highest price
-        my @all_bids;
-        for my $eid (keys %bids) {
-            for my $item (@{ $bids{$eid} }) {
-                push @all_bids, [$eid, @$item];
+        # merge all buys from all exchanges, sort from highest price
+        my @all_buys;
+        for my $exchange (keys %buys) {
+            for my $item (@{ $buys{$exchange} }) {
+                push @all_buys, [$exchange, @$item];
             }
         }
-        @all_bids = sort { $b->[1] <=> $a->[1] } @all_bids;
+        @all_buys = sort { $b->[1] <=> $a->[1] } @all_buys;
 
-        # merge all asks from all exchanges, sort from lowest price
-        my @all_asks;
-        for my $eid (keys %asks) {
-            for my $item (@{ $asks{$eid} }) {
-                push @all_asks, [$eid, @$item];
+        # merge all sells from all exchanges, sort from lowest price
+        my @all_sells;
+        for my $exchange (keys %sells) {
+            for my $item (@{ $sells{$exchange} }) {
+                push @all_sells, [$exchange, @$item];
             }
         }
-        @all_asks = sort { $a->[1] <=> $b->[1] } @all_asks;
+        @all_sells = sort { $a->[1] <=> $b->[1] } @all_sells;
 
-        my $num_order_pairs;
+        log_debug "all_buys  for %s: %s", $coin, \@all_buys;
+        log_debug "all_sells for %s: %s", $coin, \@all_sells;
+
       ARBITRAGE:
         {
-            last unless @all_bids;
+            last unless @all_buys;
 
-            # let's take a look at the highest bidder that we can sell to
-            my $eid_bid = $all_bids[0][0];
-            my $p_bid   = $all_bids[0][1];
-            my $amount_bid_cur = $all_bids[0][2];
-            my $amount_bid_usd = $amount_bid_cur * $p_bid;
-            # after subtracted by fees,
-            my $nett_p_bid = $p_bid * (1 - $fees_pct{$eid_bid}/100);
+            # let's take a look at the highest buyer that we can sell to
+            my $exchange_to_sell_to   = $all_buys[0][0];
+            my $sell_gross_price      = $all_buys[0][1]; # in USD
+            my $sell_amount           = $all_buys[0][2]; # in coin
+            my $sell_base_cur         = $all_buys[0][3] // 'USD';
+            my $sell_gross_price_base = $all_buys[0][4] // $sell_gross_price;
+            my $sell_amount_usd        = $sell_amount * $sell_gross_price;
 
-            last unless @all_asks;
-            my $i2 = 0;
-            while ($i2 < @all_asks) {
-                my $eid2 = $all_asks[$i2][0];
-                if ($eid1 == $eid2) {
-                    $i2++; next;
+            # subtract by trading fees, this is the money that we will get by
+            # selling
+            my $sell_fee_pct = App::cryp::arbit::_get_trading_fee($r, $exchange_to_sell_to, $coin);
+            log_debug "Trading fee to sell %s on %s is %.4f%%", $coin, $exchange_to_sell_to, $sell_fee_pct;
+            my $sell_net_price = $sell_gross_price * (1 - $sell_fee_pct/100);
+
+            # find coins we can buy from cheaper sellers
+            last unless @all_sells;
+            my $i = 0;
+            while ($i < @all_sells) {
+                my $exchange_to_buy_from = $all_sells[$i][0];
+                if ($exchange_to_buy_from eq $exchange_to_sell_to) {
+                    $i++; next;
                 }
-                my $p2 = $all_asks[$i2][1];
-                my $amount2_cur = $all_asks[$i2][2];
-                my $amount2_usd = $amount2_cur * $p2;
-                my $nett_p2 = (1-$p2 * (1 + $fees_pct{$eid1}/100);
+                my $buy_gross_price      = $all_sells[$i][1]; # in USD
+                my $buy_amount           = $all_sells[$i][2]; # in coin
+                my $buy_base_cur         = $all_sells[$i][3] // 'USD';
+                my $buy_gross_price_base = $all_sells[$i][4] // $buy_gross_price;
+                my $buy_amount_usd       = $buy_amount * $buy_gross_price;
 
-                # check if selling X currency at p1 on E1 while buying X
-                # currency at p2 is profitable enough
-                my $nett_p_smaller = $nett_p1 < $nett_p2 ? $nett_p1 : $nett_p2;
-                my $nett_pdiff_pct = ($nett_p1 - $nett_p2) / $nett_p_smaller * 100;
+                # add by trading fees, this is the money that we have to spend
+                # to buy the coins
+                my $buy_fee_pct = App::cryp::arbit::_get_trading_fee($r, $exchange_to_buy_from, $coin);
+                log_debug "Trading fee to buy %s on %s is %.4f%%", $coin, $exchange_to_buy_from, $buy_fee_pct;
+                my $buy_net_price = $buy_gross_price * (1 + $buy_fee_pct/100);
 
-                if ($net_pdiff_pct <= $r->{args}{min_price_difference_percentage}) {
+                my $smaller_price = $sell_net_price < $buy_net_price ? $sell_net_price : $buy_net_price;
+                my $profit_pct    = ($sell_net_price - $buy_net_price) / $smaller_price * 100;
+
+                if ($profit_pct <= $r->{args}{min_price_difference_percentage}) {
                     last ARBITRAGE;
                 }
 
-                my $balance1_cur = $balances_cur{$eid1};
-                my $balance2_usd = $balances_usd{$eid2};
-
-                # first, pick the lesser of the amount
-                my $amount_cur = $amount1_cur <= $amount2_cur ? $amount1_cur : $amount2_cur;
-
-                # second, reduce if selling balance doesn't suffice
-                if ($balances_cur{$eid1} < $amount_cur) {
-                    $amount_cur = $balances_cur{$eid1};
+                my ($amount, $amount_usd, $which_smaller);
+                if ($buy_amount > $sell_amount) {
+                    $amount = $sell_amount;
+                    $amount_usd = $sell_amount_usd;
+                    $which_smaller = 'sell';
+                } else {
+                    $amount = $buy_amount;
+                    $amount_usd = $buy_amount_usd;
+                    $which_smaller = 'buy';
                 }
-                if ($balances_usd{$eid1} < $amount_cur * $nett_p2) {
-
+                push @order_pairs, {
+                    sell => {
+                        exchange      => $exchange_to_sell_to,
+                        pair          => "$coin/$sell_base_cur",
+                        price_usd     => $sell_gross_price,
+                        net_price_usd => $sell_net_price,
+                        price_base    => $sell_gross_price_base,
+                        amount        => $amount,
+                    },
+                    buy => {
+                        exchange      => $exchange_to_buy_from,
+                        pair          => "$coin/$buy_base_cur",
+                        price_usd     => $buy_gross_price,
+                        net_price_usd => $buy_net_price,
+                        price_base    => $buy_gross_price_base,
+                        amount        => $amount,
+                    },
+                    profit_pct => $profit_pct,
+                    profit_usd => $amount_usd * $profit_pct,
+                };
+                if ($which_smaller eq 'sell') {
+                    # we used up sell orders at this price, remove from
+                    # orderbook
+                    shift @all_buys;
+                    $all_sells[$i][2] -= $amount;
+                    splice @all_sells, $i, 1 if abs($all_sells[$i][2]) < 1e-8;
+                } else {
+                    # we used up sell orders at this price, remove from
+                    # orderbook
+                    splice @all_sells, $i, 1;
+                    $all_buys[0][2] -= $amount;
+                    shift @all_buys if abs($all_buys[0][2]) < 1e-8;
                 }
-
-                log_trace "Would net profit %.3f%% by selling %s on %s at %.3f USD ".
-                    "and buying on %s at %.3f USD",
-                    $nett_pdiff_pct, $c,
-                    $r->{_exchanges}{$eid1}, $p1,
-                    $r->{_exchanges}{$eid2}, $p2,
-                    ;
-
-            }
+            } # while all_sells
         } # ARBITRAGE
 
-    } # for currency
+    } # for coin
 
-    [200];
-}
-}
-
-
-
-
-
-
-
-    $res;
+    [200, "OK", \@order_pairs];
 }
 
 1;

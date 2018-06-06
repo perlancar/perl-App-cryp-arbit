@@ -37,35 +37,20 @@ Will be fed these arguments:
 
 =over
 
-=item * dbh
+=item * r
 
-Database handle.
+Hash. The Perinci::CmdLine request hash/stash, which contains many information
+inside it, for example:
 
-=item * clients
+ $r->{_cryp}     # information from the configuration, e.g. exchanges, wallets, masternodes
+ $r->{_stash}
+   {dbh}
+   ...
 
-Hash. Exchange API client objects. Keys are exchange shortnames. Values are
-objects. All clients should follow the L<App::cryp::Role::Exchange> role.
-
-=item * balances
-
-Hash. Keys are exchange shortnames, values are account balances. Each balance is
-a hash with this structure:
-
- {
-   $currency1 => $balance1, # e.g. "BTC" => 1.2345
-   $currency2 => $balance2, $ e.g. "USD" => 2304.22
- }
-
-=back
-
-Must return an enveloped result. Its payload, upon success, is an array of
-"order pairs".
+See L<App::cryp::arbit> for more details.
 
 
 =head1 INTERNAL NOTES
-
-For ease of testing, all the required information should be passed as arguments
-instead of having to be retrieved from the database.
 
 
 =head1 SEE ALSO
