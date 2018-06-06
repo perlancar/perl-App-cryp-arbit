@@ -51,7 +51,7 @@ our $db_schema_spec = {
         # XXX later move to cryp-folio?
         'CREATE TABLE account (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
-             ctime DOUBLE NOT NULL,
+             nickname VARCHAR(64) NOT NULL,
              exchange_id INT NOT NULL,
              note VARCHAR(255)
          )',
@@ -213,6 +213,40 @@ sub _init {
         die "Cannot run the application: cannot create/upgrade database schema: $res->[1]"
             unless $res->[0] == 200;
     }
+  _CLIENTS:
+    {
+        my $time = time();
+
+        for my $exchange (sort keys %acc_exchanges) {
+
+            my $mod = "App::cryp::Exchange::$exchange";
+            $mod =~ s/-/_/g;
+            (my $modpm = "$mod.pm") =~ s!::!/!g;
+            require $modpm;
+
+            my $accounts = $acc_exchanges{$exchange};
+            for my $account (sort keys %$accounts) {
+                # assign an ID to the exchange, if not already so
+                my $eid = _get_exchange_id($r, $exchange);
+                $r->{_stash}{exchange_ids}{$exchange} = $eid;
+
+                unless ($r->{_cryp}{exchanges}{$exchange}{$account}) {
+                    return [400, "No configuration found for exchange $exchange (account $account). ".
+                                "Please specify [exchange/$exchange/$account] section in configuration"];
+                }
+                my $client = $mod->new(
+                    %{ $r->{_cryp}{exchanges}{$exchange}{$account} }
+                );
+                $r->{_stash}{exchange_clients}{$exchange}{$account} = $client;
+            } # account
+        } # exchange
+    } # INSTANTIATE_EXCHANGE_CLIENTS
+
+    [200];
+}
+
+sub _init_arbit {
+    my $r = shift;
 
   INSTANTIATE_EXCHANGE_CLIENTS:
     {
@@ -242,8 +276,6 @@ sub _init {
             } # account
         } # exchange
     } # INSTANTIATE_EXCHANGE_CLIENTS
-
-    use DD; dd $r->{_stash};
 
     [200];
 }
