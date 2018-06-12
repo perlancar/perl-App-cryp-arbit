@@ -9,10 +9,98 @@ use warnings;
 use Log::ger;
 
 use Finance::Currency::FiatX;
+use List::Util qw(min max);
 
 use Role::Tiny::With;
 
 with 'App::cryp::Role::ArbitStrategy';
+
+sub _create_order_pairs {
+    my %args = @_;
+
+    my $coin             = $args{coin};
+    my $all_buy_orders   = $args{all_buy_orders};
+    my $all_sell_orders  = $args{all_sell_orders};
+    my $min_profit_pct   = $args{min_profit_pct};
+    # TODO args{max_orders_amount_per_round}
+    # TODO args{max_order_pairs_per_round}
+
+    my @order_pairs;
+
+  CREATE:
+    while (1) {
+        last unless @$all_buy_orders;
+
+        # let's take a look at the highest buyer that we can sell to
+        my $sell = $all_buy_orders->[0];
+
+        # find coins we can buy from cheaper sellers
+        last unless @$all_sell_orders;
+
+        my $i = 0;
+        my $buy;
+        while ($i < @$all_sell_orders) {
+            $buy = $all_sell_orders->[$i];
+            # shouldn't happen though
+            if ($buy->{exchange} eq $sell->{exchange}) {
+                $i++; next;
+            }
+            last;
+        }
+        # exit when we can no longer find any seller we can buy chaper coin from
+        last CREATE unless $i < @$all_sell_orders;
+        my $smaller_price = min($sell->{net_price_usd}, $buy->{net_price_usd});
+        my $profit_pct    = ($sell->{net_price_usd} - $buy->{net_price_usd}) /
+            $smaller_price * 100;
+        log_trace "profit_pct=%.4f", $profit_pct;
+        last CREATE if $profit_pct < $min_profit_pct;
+
+        push @order_pairs, {
+            sell => {
+                exchange         => $sell->{exchange},
+                pair             => "$coin/$sell->{currency}",
+                gross_price_orig => $sell->{gross_price_orig},
+                gross_price_usd  => $sell->{gross_price_usd},
+                net_price_orig   => $sell->{net_price_orig},
+                net_price_usd    => $sell->{net_price_usd},
+            },
+            buy => {
+                exchange         => $buy->{exchange},
+                pair             => "$coin/$buy->{currency}",
+                gross_price_orig => $buy->{gross_price_orig},
+                gross_price_usd  => $buy->{gross_price_usd},
+                net_price_orig   => $buy->{net_price_orig},
+                net_price_usd    => $buy->{net_price_usd},
+            },
+            profit_pct => $profit_pct,
+        };
+        if ($sell->{amount} < $buy->{amount}) {
+            # we used up all amount from buy order from orderbook at this price,
+            # remove from orderbook
+            $order_pairs[-1]{buy}{amount}  = $sell->{amount};
+            $order_pairs[-1]{sell}{amount} = $sell->{amount};
+
+            shift @$all_buy_orders;
+            $all_sell_orders->[$i]{amount} -= $sell->{amount};
+            splice @$all_sell_orders, $i, 1
+                if abs($all_sell_orders->[$i]{amount}) < 1e-8;
+        } else {
+            # we used up all amount from sell order from orderbook at this
+            # price, remove from orderbook
+            $order_pairs[-1]{buy}{amount}  = $buy->{amount};
+            $order_pairs[-1]{sell}{amount} = $buy->{amount};
+
+            splice @$all_sell_orders, $i, 1;
+            $all_buy_orders->[0]{amount} -= $buy->{amount};
+            shift @$all_buy_orders
+                if abs($all_buy_orders->[0]{amount}) < 1e-8;
+        }
+        $order_pairs[-1]{profit_usd}   = $order_pairs[-1]{buy}{amount} *
+            ($order_pairs[-1]{sell}{net_price_usd} - $order_pairs[-1]{buy}{net_price_usd});
+    } # CREATE
+
+    \@order_pairs;
+}
 
 sub create_order_pairs {
     my ($pkg, %args) = @_;
@@ -28,13 +116,32 @@ sub create_order_pairs {
     for my $coin (@{ $r->{_stash}{coins} }) {
         log_info "Listing orderbooks for coin %s ...", $coin;
 
-        my %prices; # key = exchange_id, val = price in USD
-        my %vols  ; # key = exchange_id, val = volume in USD
+        my %sell_orders; # key = exchange safename
+        my %buy_orders ; # key = exchange safename
 
-        my %sells; # key = exchange_id, val = [[lowest-price-in-USD , amount-of-coin, orig-fiat-currency, price-in-orig-fiat-currency], [2nd-lowest-price-in-USD , amount-of-currency, ...], ...]
-        my %buys ; # key = exchange_id, val = [[highest-price-in-USD, amount-of-coin, orig-fiat-currency, price-in-orig-fiat-currency], [2nd-highest-price-in-USD, amount-of-currency, ...], ...]
+        # the final merged order book. each entry will be a hashref containing
+        # these keys:
+        #
+        # - currency (fiat currency, e.g. USD or IDR)
+        #
+        # - gross_price_orig (ask/bid price in original base currency)
+        #
+        # - gross_price_usd (gross price after converted to USD, will be the
+        #   same as gross_price_orig if currency=USD)
+        #
+        # - net_price_orig (net price after adding [if sell order, because we'll
+        #   be buying these] or subtracting [if buy order, because we'll be
+        #   selling these] trading fee from the original ask/bid price. in
+        #   original base currency)
+        #
+        # - net_price_orig (net_price_orig converted to USD)
+        #
+        # - exchange (exchange safename)
 
-        # get order books
+        my @all_buy_orders;
+        my @all_sell_orders;
+
+        # produce final merged order book.
       EXCHANGE:
         for my $exchange (sort keys %{ $r->{_stash}{exchange_clients} }) {
             my $eid = App::cryp::arbit::_get_exchange_id($r, $exchange);
@@ -73,8 +180,35 @@ sub create_order_pairs {
                     last PAIR;
                 }
 
-                # convert fiat to USD
-                unless ($cur2 eq 'USD') {
+                my $buy_fee_pct = App::cryp::arbit::_get_trading_fee(
+                    $r, $exchange, $coin);
+                for (@{ $res->[2]{buy} }) {
+                    push @{ $buy_orders{$exchange} }, {
+                        currency         => $cur2,
+                        gross_price_orig => $_->[0],
+                        net_price_orig   => $_->[0]*(1-$buy_fee_pct/100),
+                        amount           => $_->[1],
+                    };
+                }
+
+                my $sell_fee_pct = App::cryp::arbit::_get_trading_fee(
+                    $r, $exchange, $coin);
+                for (@{ $res->[2]{sell} }) {
+                    push @{ $sell_orders{$exchange} }, {
+                        currency         => $cur2,
+                        gross_price_orig => $_->[0],
+                        net_price_orig   => $_->[0]*(1+$sell_fee_pct/100),
+                        amount           => $_->[1],
+                    };
+                }
+
+                if ($cur2 eq 'USD') {
+                    for (@{ $buy_orders{$exchange} }, @{ $sell_orders{$exchange} }) {
+                        $_->{gross_price_usd} = $_->{gross_price_orig};
+                        $_->{net_price_usd}   = $_->{net_price_orig};
+                    }
+                } else {
+                    # convert fiat to USD
                     my ($fxrate_buy, $fxrate_sell);
 
                     my $cbuyres  = Finance::Currency::FiatX::convert_fiat_currency(
@@ -95,153 +229,84 @@ sub create_order_pairs {
                     }
                     $fxrate_sell = $csellres->[2];
 
-                    log_debug "Will be using these conversion rates from %s to USD: buy=%.4f, sell=%.4f",
-                        $cur2, $fxrate_buy, $fxrate_sell;
+                    #log_trace "Will be using these conversion rates from %s to USD: buy=%.4f, sell=%.4f",
+                    #    $cur2, $fxrate_buy, $fxrate_sell;
 
-                    for my $rec (@{ $res->[2]{buy} }) {
-                        $rec->[2]  = $cur2;
-                        $rec->[3]  = $rec->[0];
-                        $rec->[0] *= $fxrate_buy;
+                    # since we will be selling the coins to these buyers, we
+                    # will be getting (non-USD, e.g. IDR) fiat currencies. to
+                    # exchange these IDR for USD, we need to use the sell
+                    # fxrate.
+                    for (@{ $buy_orders{$exchange} }) {
+                        $_->{gross_price_usd} = $_->{gross_price_orig} * $fxrate_sell;
+                        $_->{net_price_usd}   = $_->{net_price_orig}   * $fxrate_sell;
                     }
-                    for my $rec (@{ $res->[2]{sell} }) {
-                        $rec->[2]  = $cur2;
-                        $rec->[3]  = $rec->[0];
-                        $rec->[0] *= $fxrate_sell;
+
+                    # similary, since we will be buying coins from these
+                    # sellers, we will be needing (non-USD, e.g. IDR) fiat
+                    # currencies. we will need to sell our USD first to get IDR.
+                    # thus, we're using the buy fxrate.
+                    for (@{ $sell_orders{$exchange} }) {
+                        $_->{gross_price_usd} = $_->{gross_price_orig} * $fxrate_buy;
+                        $_->{net_price_usd}   = $_->{net_price_orig}   * $fxrate_buy;
                     }
+
                 } # convert fiat currency
 
                 $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
-                         $time, $coin, "USD", $res->[2]{buy}[0][0], $eid, "buy");
+                         $time, $coin, "USD", $buy_orders{$exchange}[0]{gross_price_usd}, $eid, "buy");
                 $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
-                         $time, $coin, "USD", $res->[2]{sell}[0][0], $eid, "sell");
-
-                push @{ $sells{$exchange} }, @{ $res->[2]{sell} };
-                push @{ $buys {$exchange} }, @{ $res->[2]{buy}  };
+                         $time, $coin, "USD", $sell_orders{$exchange}[0]{gross_price_usd}, $eid, "sell");
+                unless ($cur2 eq 'USD') {
+                    $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
+                             $time, $coin, $cur2, $buy_orders{$exchange}[0]{gross_price_orig}, $eid, "buy");
+                    $dbh->do("INSERT INTO price (time,currency1,currency2,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
+                             $time, $coin, $cur2, $sell_orders{$exchange}[0]{gross_price_orig}, $eid, "sell");
+                }
             } # for pair
         } # for exchange
 
-        if (keys(%buys) < 2) {
+        if (keys(%buy_orders) < 2) {
             log_info "There are less than two exchanges that offer buys for %s, ".
                 "skipping this coin";
             next COIN;
         }
-        if (keys(%sells) < 2) {
+        if (keys(%sell_orders) < 2) {
             log_debug "There are less than two exchanges that offer asks for %s, skipping this round";
             next CURRENCY;
         }
 
-        # merge all buys from all exchanges, sort from highest price
-        my @all_buys;
-        for my $exchange (keys %buys) {
-            for my $item (@{ $buys{$exchange} }) {
-                push @all_buys, [$exchange, @$item];
+        # merge all buys from all exchanges, sort from highest net price
+        for my $exchange (keys %buy_orders) {
+            for (@{ $buy_orders{$exchange} }) {
+                $_->{exchange} = $exchange;
+                push @all_buy_orders, $_;
             }
         }
-        @all_buys = sort { $b->[1] <=> $a->[1] } @all_buys;
+        @all_buy_orders = sort { $b->{net_price_usd} <=> $a->{net_price_usd} }
+            @all_buy_orders;
 
         # merge all sells from all exchanges, sort from lowest price
-        my @all_sells;
-        for my $exchange (keys %sells) {
-            for my $item (@{ $sells{$exchange} }) {
-                push @all_sells, [$exchange, @$item];
+        for my $exchange (keys %sell_orders) {
+            for (@{ $sell_orders{$exchange} }) {
+                $_->{exchange} = $exchange;
+                push @all_sell_orders, $_;
             }
         }
-        @all_sells = sort { $a->[1] <=> $b->[1] } @all_sells;
+        @all_sell_orders = sort { $a->{net_price_usd} <=> $b->{net_price_usd} }
+            @all_sell_orders;
 
-        log_debug "all_buys  for %s: %s", $coin, \@all_buys;
-        log_debug "all_sells for %s: %s", $coin, \@all_sells;
+        log_trace "all_buy_orders  for %s: %s", $coin, \@all_buy_orders;
+        log_trace "all_sell_orders for %s: %s", $coin, \@all_sell_orders;
 
-      ARBITRAGE:
-        {
-            last unless @all_buys;
-
-            # let's take a look at the highest buyer that we can sell to
-            my $exchange_to_sell_to   = $all_buys[0][0];
-            my $sell_gross_price      = $all_buys[0][1]; # in USD
-            my $sell_amount           = $all_buys[0][2]; # in coin
-            my $sell_base_cur         = $all_buys[0][3] // 'USD';
-            my $sell_gross_price_base = $all_buys[0][4] // $sell_gross_price;
-            my $sell_amount_usd        = $sell_amount * $sell_gross_price;
-
-            # subtract by trading fees, this is the money that we will get by
-            # selling
-            my $sell_fee_pct = App::cryp::arbit::_get_trading_fee($r, $exchange_to_sell_to, $coin);
-            log_debug "Trading fee to sell %s on %s is %.4f%%", $coin, $exchange_to_sell_to, $sell_fee_pct;
-            my $sell_net_price = $sell_gross_price * (1 - $sell_fee_pct/100);
-
-            # find coins we can buy from cheaper sellers
-            last unless @all_sells;
-            my $i = 0;
-            while ($i < @all_sells) {
-                my $exchange_to_buy_from = $all_sells[$i][0];
-                if ($exchange_to_buy_from eq $exchange_to_sell_to) {
-                    $i++; next;
-                }
-                my $buy_gross_price      = $all_sells[$i][1]; # in USD
-                my $buy_amount           = $all_sells[$i][2]; # in coin
-                my $buy_base_cur         = $all_sells[$i][3] // 'USD';
-                my $buy_gross_price_base = $all_sells[$i][4] // $buy_gross_price;
-                my $buy_amount_usd       = $buy_amount * $buy_gross_price;
-
-                # add by trading fees, this is the money that we have to spend
-                # to buy the coins
-                my $buy_fee_pct = App::cryp::arbit::_get_trading_fee($r, $exchange_to_buy_from, $coin);
-                log_debug "Trading fee to buy %s on %s is %.4f%%", $coin, $exchange_to_buy_from, $buy_fee_pct;
-                my $buy_net_price = $buy_gross_price * (1 + $buy_fee_pct/100);
-
-                my $smaller_price = $sell_net_price < $buy_net_price ? $sell_net_price : $buy_net_price;
-                my $profit_pct    = ($sell_net_price - $buy_net_price) / $smaller_price * 100;
-
-                if ($profit_pct <= $r->{args}{min_price_difference_percentage}) {
-                    last ARBITRAGE;
-                }
-
-                my ($amount, $amount_usd, $which_smaller);
-                if ($buy_amount > $sell_amount) {
-                    $amount = $sell_amount;
-                    $amount_usd = $sell_amount_usd;
-                    $which_smaller = 'sell';
-                } else {
-                    $amount = $buy_amount;
-                    $amount_usd = $buy_amount_usd;
-                    $which_smaller = 'buy';
-                }
-                push @order_pairs, {
-                    sell => {
-                        exchange      => $exchange_to_sell_to,
-                        pair          => "$coin/$sell_base_cur",
-                        price_usd     => $sell_gross_price,
-                        net_price_usd => $sell_net_price,
-                        price_base    => $sell_gross_price_base,
-                        amount        => $amount,
-                    },
-                    buy => {
-                        exchange      => $exchange_to_buy_from,
-                        pair          => "$coin/$buy_base_cur",
-                        price_usd     => $buy_gross_price,
-                        net_price_usd => $buy_net_price,
-                        price_base    => $buy_gross_price_base,
-                        amount        => $amount,
-                    },
-                    profit_pct => $profit_pct,
-                    profit_usd => $amount_usd * $profit_pct,
-                };
-                if ($which_smaller eq 'sell') {
-                    # we used up sell orders at this price, remove from
-                    # orderbook
-                    shift @all_buys;
-                    $all_sells[$i][2] -= $amount;
-                    splice @all_sells, $i, 1 if abs($all_sells[$i][2]) < 1e-8;
-                } else {
-                    # we used up sell orders at this price, remove from
-                    # orderbook
-                    splice @all_sells, $i, 1;
-                    $all_buys[0][2] -= $amount;
-                    shift @all_buys if abs($all_buys[0][2]) < 1e-8;
-                }
-            } # while all_sells
-        } # ARBITRAGE
-
+        my $coin_order_pairs = _create_order_pairs(
+            coin => $coin,
+            all_buy_orders => \@all_buy_orders,
+            all_sell_orders => \@all_sell_orders,
+            min_profit_pct => $args{min_profit_pct},
+            max_orders_amount_per_round => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_orders_amount_per_round},
+            max_order_pairs_per_round   => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_pairs_per_round},
+        );
+        push @order_pairs, @$coin_order_pairs;
     } # for coin
 
     [200, "OK", \@order_pairs];
@@ -249,6 +314,8 @@ sub create_order_pairs {
 
 1;
 # ABSTRACT: Using merged order books for arbitration
+
+=for Pod::Coverage ^(.+)$
 
 =head1 SYNOPSIS
 
@@ -331,9 +398,9 @@ long time and incurs relatively high network fees. Instead, we maintain bitcoin
 and USD balances on each exchange to be able to buy/sell quickly. The balances
 serve as "working capital" or "inventory".
 
-The minimum percentage difference is I<min_price_difference_percentage>. We
-create buy/sell order pairs starting from the topmost of the merged order book,
-until we can't get I<min_price_difference_percentage> anymore.
+The minimum profit percentage is I<min_profit_pct>. We create buy/sell order
+pairs starting from the topmost of the merged order book, until we can't get
+I<min_profit_pct> anymore.
 
 Then we monitor our order pairs and cancel them if they remain unfilled for a
 while.
@@ -360,56 +427,26 @@ to buy X BTC at price P, it might not get fulfilled completely or at all because
 the market price has moved above P, for example.
 
 
-=head1 METHODS
+=head1 CONFIGURATION
 
-=head2 create_order_pairs
+You can put these configuration under the [arbit-strategies/merge_order_book]
+section:
 
-Usage:
+=item * max_orders_amount_per_round
 
-  __PACKAGE__->create_order_pairs(%args) => [$status, $reason, $payload, \%resmeta]
+Number, in USD. The total amount of order pairs per order book matching. Note
+that this amount is on a per-coin basis. Also, only the selling amounts are
+totaled. Default is unlimited.
 
-Known arguments are those specified in L<App::cryp::Role::ArbitStrategy>, plus:
+=item * max_order_pairs_per_round
 
-=over
-
-=item * order_books
-
-Optional. Hash. If unset, will be requested from the exchange API clients.
-
-Keys are exchange shortnames, values are hashes. Each hash is of the following
-structure:
-
- {
-   request_time  => $req_epoch, # when we request the order book, hires
-   response_time => $res_epoch, # when we get the order book response, hires
-   response      => $env_result,
- }
-
-The response (C<$env_result>) is what is returned by the C<get_order_book()>
-method or a C<App::cryp::Exchange::*> module (see L<App::cryp::Role::Exchange>).
-Particularly, the payload of the response is something of the following
-structure:
-
- {buy => [
-     # sorted from the highest price
-     [$buyprice1, $buyamount1],
-     [$buyprice2, $buyamount2],
-     ,,,
-  ],
-  sell => [
-     # sorted from the lowest price
-     [$sellprice1, $sellamount1],
-     [$sellprice2, $sellamount2],
-     ,,,
-  ]}
+Number. Default is unlimited.
 
 =back
 
 
-=head1 INTERNAL NOTES
-
-For ease of testing, all the required information should be passed as arguments
-instead of having to be retrieved from the database.
-
-
 =head1 SEE ALSO
+
+L<App::cryp::arbit>
+
+Other C<App::cryp::arbit::Strategy::*> modules.

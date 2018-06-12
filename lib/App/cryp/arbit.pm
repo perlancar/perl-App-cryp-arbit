@@ -323,14 +323,14 @@ sub _init {
     {
         my $time = time();
 
-        for my $exchange (sort keys %acc_exchanges) {
+        for my $exchange (sort keys %account_exchanges) {
 
             my $mod = "App::cryp::Exchange::$exchange";
             $mod =~ s/-/_/g;
             (my $modpm = "$mod.pm") =~ s!::!/!g;
             require $modpm;
 
-            my $accounts = $acc_exchanges{$exchange};
+            my $accounts = $account_exchanges{$exchange};
             for my $account (sort keys %$accounts) {
                 # assign an ID to the exchange, if not already so
                 my $eid = _get_exchange_id($r, $exchange);
@@ -396,8 +396,8 @@ sub _init_arbit {
             if (@impossible_coins) {
                 log_warn "The following coin(s) are not traded on at least two exchanges: %s, excluding these coins",
                     \@impossible_coins;
-                @coins = @coins1;
             }
+            @coins = @coins1;
         } else {
             log_warn "Will be arbitraging these coin(s) that are traded on at least two exchanges: %s",
                 \@possible_coins;
@@ -441,11 +441,11 @@ $SPEC{arbit} = {
 
 This utility monitors prices of several coins in several cryptoexchanges. When
 it detects a price difference for a coin (e.g. BTC) that is large enough (see
-`min_price_difference_percentage` option), it will perform buy order on the
-exchange that has the lower price (note: the account on this exchange must have
-enough base currency balance, e.g. USD if the pair is BTC/USD) and sell order on
-the exchange that has the higher price (note: the account on this exchange must
-have enough BTC balance).
+`min_profit_pct` option), it will perform buy order on the exchange that has the
+lower price (note: the account on this exchange must have enough quote currency
+balance, e.g. USD if the pair is BTC/USD) and sell order on the exchange that
+has the higher price (note: the account on this exchange must have enough BTC
+balance).
 
 The balances are called inventories or your working capital. You fill and
 transfer inventories manually to refill balances and/or to collect profits.
@@ -520,18 +520,18 @@ the arbitrage transaction will be recorded.
 
 _
         },
-        min_price_difference_percentage => {
+        min_profit_pct => {
             summary => 'What minimum percentage of price difference should '.
                 'trigger an arbitrage transaction',
             schema => 'float*',
             req => 1,
             description => <<'_',
 
-Below this percentage number, price difference will be recorded in the database
-but will be ignored (not acted upon). Note that the price difference that will
-be considered is the *net* price difference (after subtracted by trading fees).
+Below this percentage number, no order pairs will be made to do the arbitrage.
+Note that the price difference that will be considered is the *net* price
+difference (after subtracted by trading fees).
 
-See also: `order_max_amount`.
+See also: `max_order_amount`.
 
 _
             tags => ['category:profit-setting'],
