@@ -8,6 +8,7 @@ use strict;
 use warnings;
 use Log::ger;
 
+require App::cryp::arbit;
 use Finance::Currency::FiatX;
 use List::Util qw(min max);
 
@@ -21,7 +22,7 @@ sub _create_order_pairs {
     my $base_currency         = $args{base_currency};
     my $all_buy_orders        = $args{all_buy_orders};
     my $all_sell_orders       = $args{all_sell_orders};
-    my $min_profit_pct        = $args{min_profit_pct};
+    my $min_profit_pct        = $args{min_profit_pct} // 0;
     my $max_orders_quote_size = $args{max_orders_quote_size};
     my $max_order_pairs       = $args{max_order_pairs};
 
@@ -78,29 +79,29 @@ sub _create_order_pairs {
             },
             profit_pct => $profit_pct,
         };
-        if ($sell->{amount} < $buy->{amount}) {
+        if ($sell->{base_size} < $buy->{base_size}) {
             # we used up all amount from buy order from orderbook at this price,
             # remove from orderbook
-            $order_pairs[-1]{size}  = $sell->{amount};
+            $order_pairs[-1]{base_size}  = $sell->{base_size};
 
             shift @$all_buy_orders;
-            $all_sell_orders->[$i]{amount} -= $sell->{amount};
+            $all_sell_orders->[$i]{base_size} -= $sell->{base_size};
             splice @$all_sell_orders, $i, 1
-                if abs($all_sell_orders->[$i]{amount}) < 1e-8;
+                if abs($all_sell_orders->[$i]{base_size}) < 1e-8;
         } else {
             # we used up all amount from sell order from orderbook at this
             # price, remove from orderbook
-            $order_pairs[-1]{size}  = $buy->{amount};
+            $order_pairs[-1]{base_size}  = $buy->{base_size};
 
             splice @$all_sell_orders, $i, 1;
-            $all_buy_orders->[0]{amount} -= $buy->{amount};
+            $all_buy_orders->[0]{base_size} -= $buy->{base_size};
             shift @$all_buy_orders
-                if abs($all_buy_orders->[0]{amount}) < 1e-8;
+                if abs($all_buy_orders->[0]{base_size}) < 1e-8;
         }
-        $order_pairs[-1]{profit}   = $order_pairs[-1]{size} *
+        $order_pairs[-1]{profit}   = $order_pairs[-1]{base_size} *
             ($order_pairs[-1]{sell}{net_price} - $order_pairs[-1]{buy}{net_price});
 
-        $orders_quote_size += $order_pairs[-1]{size} *
+        $orders_quote_size += $order_pairs[-1]{base_size} *
             $order_pairs[-1]{sell}{gross_price};
 
     } # CREATE
@@ -114,13 +115,42 @@ sub create_order_pairs {
     my $r = $args{r};
     my $dbh = $r->{_stash}{dbh};
 
-    #my $accbals = App::cryp::arbit::_get_account_balances($r);
-
     my @order_pairs;
 
-  BASE_CURRENCY:
-    for my $base_currency (@{ $r->{_stash}{base_currencies} }) {
-        log_info "Listing orderbooks for base currency %s ...", $base_currency;
+    my %exchanges_for; # key="base currency"/"quote cryptocurrency or ':fiat'", value => [exchange, ...]
+    my %fiat_for;      # key=exchange safename, val=[fiat currency, ...]
+    my %pairs_for;     # key=exchange safename, val=[pair, ...]
+  DETERMINE_SETS:
+    for my $exchange (sort keys %{ $r->{_stash}{exchange_clients} }) {
+        my $pairs = $r->{_stash}{exchange_pairs}{$exchange};
+        for my $pair (@$pairs) {
+            my ($basecur, $quotecur) = $pair =~ m!(.+)/(.+)!;
+            next unless grep { $_ eq $basecur  } @{ $r->{_stash}{base_currencies}  };
+            next unless grep { $_ eq $quotecur } @{ $r->{_stash}{quote_currencies} };
+
+            my $key;
+            if (App::cryp::arbit::_is_fiat($quotecur)) {
+                $key = "$basecur/:fiat";
+                $fiat_for{$exchange} //= [];
+                push @{ $fiat_for{$exchange} }, $quotecur
+                    unless grep { $_ eq $quotecur } @{ $fiat_for{$exchange} };
+            } else {
+                $key = "$basecur/$quotecur";
+            }
+            $exchanges_for{$key} //= [];
+            push @{ $exchanges_for{$key} }, $exchange;
+
+            $pairs_for{$exchange} //= [];
+            push @{ $pairs_for{$exchange} }, $pair
+                unless grep { $_ eq $pair } @{ $pairs_for{$exchange} };
+        }
+    }
+
+    #my $accbals = App::cryp::arbit::_get_account_balances($r);
+
+  SET:
+    for my $set (sort keys %exchanges_for) {
+        my ($base_currency, $quote_currency0) = $set =~ m!(.+)/(.+)!;
 
         my %sell_orders; # key = exchange safename
         my %buy_orders ; # key = exchange safename
@@ -156,12 +186,17 @@ sub create_order_pairs {
             my $clients = $r->{_stash}{exchange_clients}{$exchange};
             my $client = $clients->{ (sort keys %$clients)[0] };
 
+            my @pairs;
+            if ($quote_currency0 eq ':fiat') {
+                push @pairs, map { "$base_currency/$_" } @{ $fiat_for{$exchange} };
+            } else {
+                push @pairs, $set;
+            }
+
           PAIR:
-            my $pairs = $r->{_stash}{exchange_pairs}{$exchange};
-            for my $pair (@$pairs) {
+            for my $pair (@pairs) {
                 my ($basecur, $quotecur) = split m!/!, $pair;
-                next unless $basecur eq $base_currency;
-                next unless grep { $quotecur eq $_ } @{ $r->{_stash}{quote_currencies} };
+                next unless grep { $_ eq $pair } @{ $pairs_for{$exchange} };
 
                 my $time = time();
                 log_debug "Getting orderbook %s on %s ...", $pair, $exchange;
@@ -272,15 +307,16 @@ sub create_order_pairs {
             } # for pair
         } # for exchange
 
+        # sanity checks
         if (keys(%buy_orders) < 2) {
             log_info "There are less than two exchanges that buy %s, ".
                 "skipping this base currency";
-            next BASE_CURRENCY;
+            next SET;
         }
         if (keys(%sell_orders) < 2) {
             log_debug "There are less than two exchanges that sell %s, skipping this base currency",
                 $base_currency;
-            next BASE_CURRENCY;
+            next SET;
         }
 
         # merge all buys from all exchanges, sort from highest net price
@@ -315,7 +351,7 @@ sub create_order_pairs {
             max_order_pairs   => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_pairs_per_round},
         );
         push @order_pairs, @$coin_order_pairs;
-    } # for coin
+    } # for set (base currency)
 
     [200, "OK", \@order_pairs];
 }

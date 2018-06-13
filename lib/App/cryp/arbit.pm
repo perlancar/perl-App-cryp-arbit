@@ -36,6 +36,60 @@ our %args_db = (
     },
 );
 
+# shared between these subcommands: show
+our %args_arbit_common = (
+    strategy => {
+        summary => 'Which strategy to use for arbitration',
+        schema => ['str*', match=>qr/\A\w+\z/],
+        default => 'merge_order_book',
+        tags => ['category:strategy'],
+        description => <<'_',
+
+Strategy is implemented in a `App::cryp::arbit::Strategy::*` perl module.
+
+_
+    },
+    accounts => {
+        summary => 'Cryptoexchange accounts',
+        schema => ['array*', of=>'cryptoexchange::account', min_len=>2],
+        description => <<'_',
+
+There should at least be two accounts, on at least two different
+cryptoexchanges. If not specified, all accounts listed on the configuration file
+will be included. Note that it's possible to include two or more accounts on the
+same cryptoexchange.
+
+_
+    },
+    base_currencies => {
+        summary => 'Target (crypto)currencies to arbitrate',
+        schema => ['array*', of=>'cryptocurrency*', min_len=>1],
+        description => <<'_',
+
+If not specified, will list all supported pairs on all the exchanges and include
+the base cryptocurrencies that are listed on at least 2 different exchanges (for
+arbitrage possibility).
+
+_
+    },
+    quote_currencies => {
+        summary => 'The currencies to exchange (buy/sell) the target currencies',
+        schema => ['array*', of=>'fiat_or_cryptocurrency*', min_len=>1],
+        description => <<'_',
+
+You can have fiat currencies as the quote currencies, to buy/sell the target
+(base) currencies during arbitrage. For example, to arbitrage LTC against USD
+and IDR, `base_currencies` is ['BTC'] and `quote_currencies` is ['USD', 'IDR'].
+
+You can also arbitrage cryptocurrencies against other cryptocurrency (usually
+BTC, "the USD of cryptocurrencies"). For example, to arbitrage XMR and LTC
+against BTC, `base_currencies` is ['XMR', 'LTC'] and `quote_currencies` is
+['BTC'].
+
+_
+    },
+);
+
 our $db_schema_spec = {
     component_name => 'cryp_arbit',
     latest_v => 1,
@@ -96,6 +150,7 @@ our $db_schema_spec = {
              size DECIMAL(21,8) NOT NULL, -- amount of "currency" that we are arbitraging (sell on "sell_exchange" and buy on "buy_exchange")
 
              -- we sell "amount" of "currency"" on "sell exchange" (the "currency"/"sell_exchange_currency" market pair) at "sell_price" (in "sell_exchange_currency")
+             sell_account_id INT NOT NULL,
              sell_exchange_id INT NOT NULL,
              sell_exchange_currency VARCHAR(10) NOT NULL,
              sell_exchange_ctime DOUBLE, -- create time in "sell exchange"
@@ -106,6 +161,7 @@ our $db_schema_spec = {
              sell_order_status VARCHAR(16) NOT NULL,
 
              -- then buy the same "amount" of "currency" on "buy_exchange" at "buy_price" (in "buy_exchange_currency")
+             buy_account_id INT NOT NULL,
              buy_exchange_id INT NOT NULL,
              buy_exchange_currency VARCHAR(10) NOT NULL,
              buy_exchange_ctime DOUBLE, -- order create time in "buy_exchange"
@@ -124,6 +180,9 @@ our $db_schema_spec = {
          )',
     ],
 };
+
+my $fnum4 = [number => {precision=>4}];
+my $fnum8 = [number => {precision=>8}];
 
 sub _exchange_catalog {
     state $xcat = do {
@@ -359,18 +418,25 @@ sub _init_arbit {
             my $pairs = _get_exchange_pairs($r, $e);
             for my $pair (@$pairs) {
                 my ($basecur, $quotecur) = split m!/!, $pair;
-                my $key = _is_fiat($quotecur) ? ':fiat' : $quotecur;
+                # consider all fiat currencies as a single ":fiat" because we
+                # assume fiat currencies can be converted from one to the aother
+                # at a stable rate.
+                my $key;
+                if (_is_fiat($quotecur)) {
+                    $key = ':fiat';
+                    $fiatquotecurs{$quotecur} = 1;
+                } else {
+                    $key = $quotecur;
+                }
                 $quotecur_exchanges{$key}{$e} = 1;
-                $fiatquotecurs{$quotecur} = 1 if _is_fiat($quotecur);
             }
         }
 
-        # only consider quote cryptocurrencies that are traded in >1 exchanges,
-        # for arbitrage possibility. but allow fiat currencies that are traded
-        # in just one exchange because we assume we can exchange fiat currencies
-        # at a stable rate.
+        # only consider quote currencies that are traded in >1 exchanges, for
+        # arbitrage possibility.
         my @possible_quotecurs = grep { keys(%{$quotecur_exchanges{$_}}) > 1 }
             sort keys %quotecur_exchanges;
+        # convert back fiat currencies back to their original
         if (grep {':fiat'} @possible_quotecurs) {
             @possible_quotecurs = grep {$_ ne ':fiat'} @possible_quotecurs;
             push @possible_quotecurs, sort keys %fiatquotecurs;
@@ -395,21 +461,7 @@ sub _init_arbit {
             @quotecurs = @possible_quotecurs;
         }
 
-        # check that quote_currencies: must all be fiat, or a single
-        # cryptocurrency
-        if ($r->{args}{quote_currencies}) {
-            if (@{ $r->{args}{quote_currencies} } > 1) {
-                if (grep {!_is_fiat($_)} @{ $r->{args}{quote_currencies} }) {
-                    return [400, "Multiple cryptocurrencies is currently not allowed for quote_currencies (".join(", ", @quotecurs)."), please choose only one cryptocurrency"];
-                } elsif ((grep {_is_fiat($_)} @{ $r->{args}{quote_currencies} }) &&
-                             (grep {!_is_fiat($_)} @{ $r->{args}{quote_currencies} })) {
-                    return [400, "Cannot mix fiat and crypto in quote_currencies (".join(", ", @quotecurs)."), please choose either only fiat currencies or a single cryptocurrency"];
-                }
-            }
-        }
-
         $r->{_stash}{quote_currencies} = \@quotecurs;
-        $r->{_stash}{quote_currencies_are_fiat} = _is_fiat($quotecurs[0]);
     } # DETERMINE_QUOTE_CURRENCIES
 
     # determine possible base currencies to arbitrage against
@@ -488,6 +540,84 @@ sub dump_cryp_config {
     [200, "OK", $r->{_cryp}];
 }
 
+$SPEC{show} = {
+    v => 1.1,
+    summary => 'Show arbitrage possibilities',
+    args => {
+        %args_db,
+        %args_arbit_common,
+        min_profit_pct => {
+            summary => 'What minimum percentage of price difference should '.
+                'be considered',
+            schema => 'float*',
+            default => 0,
+        },
+    },
+};
+sub show {
+    my %args = @_;
+
+    my $r = $args{-cmdline_r};
+    # XXX schema
+    my $strategy = $args{strategy} // 'merge_order_book';
+
+    my $res;
+
+    $res = _init($r); return $res unless $res->[0] == 200;
+    $res = _init_arbit($r); return $res unless $res->[0] == 200;
+
+    my $strategy_mod = "App::cryp::arbit::Strategy::$strategy";
+    (my $strategy_modpm = "$strategy_mod.pm") =~ s!::!/!g;
+    require $strategy_modpm;
+
+    $res = $strategy_mod->create_order_pairs(r => $r);
+    return $res unless $res->[0] == 200;
+
+    log_trace "order pairs: %s", $res->[2];
+
+    # format for table display
+    my @res;
+    for my $orderpair (@{ $res->[2] }) {
+        my $size = $orderpair->{base_size};
+        my ($base_currency, $buy_currency)  = $orderpair->{buy}{pair}  =~ m!(.+)/(.+)!;
+        my ($sell_currency) = $orderpair->{sell}{pair} =~ m!/(.+)!;
+        my $profit_currency = _is_fiat($buy_currency) ? 'USD' : $buy_currency;
+
+        my $rec = {
+            size     => $size,
+            currency => $base_currency,
+            buy_from => $orderpair->{buy}{exchange},
+            buy_currency     => $buy_currency,
+            buy_gross_price  => $orderpair->{buy}{gross_price_orig},
+            buy_net_price    => $orderpair->{buy}{net_price_orig},
+            sell_to          => $orderpair->{sell}{exchange},
+            sell_currency    => $sell_currency,
+            sell_gross_price => $orderpair->{sell}{gross_price_orig},
+            sell_net_price   => $orderpair->{sell}{net_price_orig},
+            profit_pct       => $orderpair->{profit_pct},
+            profit_currency  => $profit_currency,
+            profit           => $orderpair->{profit},
+        };
+        if (_is_fiat($buy_currency) && $buy_currency ne 'USD') {
+            $rec->{buy_gross_price_usd} = $orderpair->{buy}{gross_price};
+            $rec->{buy_net_price_usd}   = $orderpair->{buy}{net_price};
+        }
+        if (_is_fiat($sell_currency) && $sell_currency ne 'USD') {
+            $rec->{sell_gross_price_usd} = $orderpair->{sell}{gross_price};
+            $rec->{sell_net_price_usd}   = $orderpair->{sell}{net_price};
+        }
+        push @res, $rec;
+    }
+
+    my $resmeta = {};
+    $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_net_price', 'buy_gross_price_usd', 'buy_net_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_net_price', 'sell_gross_price_usd', 'sell_net_price_usd', 'profit_pct', 'profit_currency', 'profit'];
+    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_pross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
+    $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,          $fnum8,                $fnum8,              undef,     undef,           $fnum8,             $fnum8,           $fnum8,                 $fnum8,               $fnum4,       undef,             $fnum8];
+    $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',         'right',               'right',             'left',    'left',          'right',            'right',          'right',                'right',              'right',      'left',            'right'];
+
+    [200, "OK", \@res, $resmeta];
+}
+
 $SPEC{arbit} = {
     v => 1.1,
     summary => 'Perform arbitrage',
@@ -513,62 +643,8 @@ transfer inventories manually to refill balances and/or to collect profits.
 _
     args => {
         %args_db,
-        strategy => {
-            summary => 'Which strategy to use for arbitration',
-            schema => ['str*', match=>qr/\A\w+\z/],
-            default => 'merge_order_book',
-            tags => ['category:strategy'],
-            description => <<'_',
-
-Strategy is implemented in a `App::cryp::arbit::Strategy::*` perl module.
-
-_
-        },
-        accounts => {
-            summary => 'Cryptoexchange accounts',
-            schema => ['array*', of=>'cryptoexchange::account', min_len=>2],
-            description => <<'_',
-
-There should at least be two accounts, on at least two different
-cryptoexchanges. If not specified, all accounts listed on the configuration file
-will be included. Note that it's possible to include two or more accounts on the
-same cryptoexchange.
-
-_
-        },
-        base_currencies => {
-            summary => 'Target (crypto)currencies to arbitrate',
-            schema => ['array*', of=>'cryptocurrency*', min_len=>1],
-            description => <<'_',
-
-If not specified, will list all supported pairs on all the exchanges and include
-the base cryptocurrencies that are listed on at least 2 different exchanges (for
-arbitrage possibility).
-
-_
-        },
-        quote_currencies => {
-            summary => 'The currencies to exchange (buy/sell) the target currencies',
-            schema => ['array*', of=>'fiat_or_cryptocurrency*', min_len=>1],
-            description => <<'_',
-
-The relatively stable currenc(y|ies) to buy/sell the target (base) currencies to
-arbitrage. For example, if you are arbitraging BTC against fiat currencies,
-`base_currencies` is ['BTC'] and `quote_currencies` might be ['USD', 'IDR'].
-
-You can also arbitrage cryptocurrencies against other cryptocurrency (usually
-BTC, "the USD of cryptocurrencies"). For example, you might be arbitraging
-['XMR', 'LTC'] (`base_currencies`) against ['BTC'] (`quote_currencies`).
-
-Must be all fiat currencies (all fiat currencies are assumed to have stable
-currency rate and will be converted to USD for calculation) or a single
-cryptocurrency (e.g. BTC) (cryptocurrencies are currently assumed to have
-unstable exchange rate so we do not convert between cryptocurrencies for the
-quote currencies).
-
-_
-        },
-        arbit_frequency => {
+        %args_arbit_common,
+        frequency => {
             summary => 'How many seconds to wait between rounds (in seconds)',
             schema => 'posint*',
             default => 30,
@@ -628,14 +704,6 @@ the inventory.
 _
             tags => ['category:trading'],
         },
-
-        #TODO:
-        #base_fiat_currency => {
-        #    schema => 'currency::code*',
-        #    default => 'USD',
-        #    tags => ['category:fiat'],
-        #},
-
     },
     features => {
         dry_run => 1,
@@ -690,8 +758,8 @@ sub arbit {
 
       SLEEP:
         log_trace "Sleeping for %d second(s) before next round ...",
-            $args{arbit_frequency};
-        sleep $args{arbit_frequency};
+            $args{frequency};
+        sleep $args{frequency};
     }
 
     [200]; # should not be reached
@@ -735,7 +803,7 @@ passing C<$r> around. The keys that are used by routines in this module:
    {exchange_coins}            # key=exchange safename, value=[COIN1, COIN2, ...]
    {exchange_pairs}            # key=exchange safename, value=[PAIR1, PAIR2, ...]
    {quote_currencies}          # what currencies we use to buy/sell the base currencies
-   {quote_currencies_are_fiat} # bool, whether quote currencies are fiat
+   {quote_currencies_for}      # key=base currency, value={quotecurrency1 => 1, quotecurrency2=>1, ...}
    {trading_fees}              # key=exchange safename, value={coin1=>num (in percent) market taker fees, ...}, ':default' for all other coins, ':default' for all other exchanges
 
 
