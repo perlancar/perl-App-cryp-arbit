@@ -23,20 +23,17 @@ sub _create_order_pairs {
     my $all_buy_orders        = $args{all_buy_orders};
     my $all_sell_orders       = $args{all_sell_orders};
     my $min_profit_pct        = $args{min_profit_pct} // 0;
-    my $max_orders_quote_size = $args{max_orders_quote_size};
+    my $max_order_quote_size  = $args{max_order_quote_size};
     my $max_order_pairs       = $args{max_order_pairs};
     my $account_balances      = $args{account_balances};
+    my $min_account_balances  = $args{min_account_balances};
 
     my @order_pairs;
 
-    my $orders_quote_size = 0;
   CREATE:
     while (1) {
         last CREATE if defined $max_order_pairs &&
             @order_pairs >= $max_order_pairs;
-
-        last CREATE if defined $max_orders_quote_size &&
-            $orders_quote_size >= $max_orders_quote_size;
 
         my ($sell, $sell_index);
       FIND_BUYER:
@@ -113,11 +110,16 @@ sub _create_order_pairs {
             $order_pairs[-1]{buy}{account}  = $account_balances->{ $buy ->{exchange} }{$buy->{quote_currency}}[0]{account};
         }
 
-        # limit maximum size
+        # limit maximum size of order
         my @sizes = (
             {which => 'buy order' , size => $sell->{base_size}},
             {which => 'sell order', size => $buy ->{base_size}},
         );
+        if (defined $max_order_quote_size) {
+            push @sizes, (
+                {which => 'max_order_quote_size', size => $max_order_quote_size / max($sell->{gross_price}, $buy->{gross_price})},
+            );
+        }
         if ($account_balances) {
             push @sizes, (
                 {
@@ -176,8 +178,6 @@ sub _create_order_pairs {
         $order_pairs[-1]{base_size} = $order_size;
         $order_pairs[-1]{profit}   = $order_size *
             ($order_pairs[-1]{sell}{net_price} - $order_pairs[-1]{buy}{net_price});
-
-        $orders_quote_size += $order_size * $order_pairs[-1]{sell}{gross_price};
 
     } # CREATE
 
@@ -427,9 +427,10 @@ sub create_order_pairs {
             all_buy_orders => \@all_buy_orders,
             all_sell_orders => \@all_sell_orders,
             min_profit_pct => $r->{args}{min_profit_pct},
-            max_orders_amount => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_orders_amount_per_round},
-            max_order_pairs   => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_pairs_per_round},
-            (account_balances => $r->{_stash}{account_balances}) x !$r->{args}{disregard_balance},
+            max_order_quote_size => $r->{args}{max_order_quote_size},
+            max_order_pairs      => $r->{args}{max_order_pairs_per_round},
+            (account_balances    => $r->{_stash}{account_balances}) x !$r->{args}{disregard_balance},
+            min_account_balances => $r->{args}{min_account_balances},
         );
         push @order_pairs, @$coin_order_pairs;
     } # for set (base currency)
@@ -553,20 +554,6 @@ the market price has moved above P, for example.
 
 
 =head1 CONFIGURATION
-
-You can put these configuration under the [arbit-strategies/merge_order_book]
-section:
-
-=item * max_orders_quote_size_per_round
-
-Number, in quote currency. Default is unlimited. The total amount of order pairs
-per round, where a round consists of matching order books from all exchanges.
-Note that this size is on a per-base-currency basis.
-
-=item * max_order_pairs_per_round
-
-Positive number. Default is unlimited. The maximum number of order pairs to
-create per round. Note that this size is on a per-base-currency basis.
 
 =item * max_order_size_as_book_item_size_pct
 

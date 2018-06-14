@@ -36,13 +36,12 @@ our %args_db = (
     },
 );
 
-# shared between these subcommands: show
+# shared between these subcommands: show, arbit
 our %args_arbit_common = (
     strategy => {
         summary => 'Which strategy to use for arbitration',
         schema => ['str*', match=>qr/\A\w+\z/],
         default => 'merge_order_book',
-        tags => ['category:strategy'],
         description => <<'_',
 
 Strategy is implemented in a `App::cryp::arbit::Strategy::*` perl module.
@@ -87,6 +86,50 @@ against BTC, `base_currencies` is ['XMR', 'LTC'] and `quote_currencies` is
 ['BTC'].
 
 _
+    },
+    min_profit_pct => {
+        summary => 'What minimum percentage of price difference should '.
+            'trigger an arbitrage transaction',
+        schema => 'float*',
+        default => 0,
+        description => <<'_',
+
+Below this percentage number, no order pairs will be made to do the arbitrage.
+Note that the price difference that will be considered is the *net* price
+difference (after subtracted by trading fees).
+
+_
+    },
+    max_order_quote_size => {
+        summary => 'What is the maximum amount of a single order',
+        schema => 'float*',
+        default => 100,
+        description => <<'_',
+
+A single order will be limited to not be above this value (in quote currency,
+which if fiat will be converted to USD). This is the amount for the buying
+(because an arbitrage transaction is comprised of a pair of orders, where one
+order is a selling order at a higher quote currency size than the buying order).
+
+For example if you are arbitraging BTC against USD and IDR, and set this option
+to 75, then orders will not be above 75 USD. If you are arbitraging LTC against
+BTC and set this to 0.03 then orders will not be above 0.03 BTC.
+
+_
+    },
+    max_order_pairs_per_round => {
+        summary => 'Maximum number of order pairs to create per round',
+        schema => 'posint*',
+    },
+    min_account_balances => {
+        summary => 'What are the minimum account balances',
+        schema => ['hash*', {
+            each_key => 'cryptoexchange::account*',
+            each_value => ['hash*', {
+                each_key => 'fiat_or_cryptocurrency*',
+                each_value => 'float',
+            }],
+        }],
     },
 );
 
@@ -569,12 +612,6 @@ $SPEC{show} = {
     args => {
         %args_db,
         %args_arbit_common,
-        min_profit_pct => {
-            summary => 'What minimum percentage of price difference should '.
-                'be considered',
-            schema => 'float*',
-            default => 0,
-        },
         disregard_balance => {
             summary => 'Disregard account balances',
             schema => 'bool*',
@@ -676,7 +713,6 @@ _
             summary => 'How many seconds to wait between rounds (in seconds)',
             schema => 'posint*',
             default => 30,
-            tags => ['category:timing'],
             description => <<'_',
 
 A round consists of checking prices and then creating arbitraging order pairs.
@@ -688,7 +724,6 @@ _
                 'before cancelling them (in seconds)',
             schema => 'posint*',
             default => 2*60,
-            tags => ['category:limit', 'category:order-pair'],
             description => <<'_',
 
 Sometimes because of rapid trading and price movement, our order might not be
@@ -697,59 +732,6 @@ left open. After this limit is reached, we cancel the order. The imbalance of
 the arbitrage transaction will be recorded.
 
 _
-        },
-        min_profit_pct => {
-            summary => 'What minimum percentage of price difference should '.
-                'trigger an arbitrage transaction',
-            schema => 'float*',
-            req => 1,
-            description => <<'_',
-
-Below this percentage number, no order pairs will be made to do the arbitrage.
-Note that the price difference that will be considered is the *net* price
-difference (after subtracted by trading fees).
-
-_
-            tags => ['category:profit'],
-        },
-        max_order_quote_size => {
-            summary => 'What is the maximum amount of a single order',
-            schema => 'float*',
-            default => 100,
-            description => <<'_',
-
-A single order will be limited to not be above this value (in quote currency,
-which if fiat will be converted to USD). This is the amount for the selling
-(because an arbitrage transaction is comprised of a pair of orders, where one
-order is a selling order at a higher quote currency size than the buying order).
-
-For example if you are arbitraging BTC against USD and IDR, and set this option
-to 50, then orders will not be below 50 USD. If you are arbitraging LTC against
-BTC and set this to 0.01 then orders will not be below 0.01 BTC.
-
-Note that order size can also be smaller due to: 1) insufficient demand (when
-selling) or supply (when buying) in the order book; 2) insufficient balance of
-the inventory.
-
-_
-            tags => ['category:limit', 'category:order'],
-        },
-        min_account_balance => {
-            summary => 'What is the minimum account balance',
-            schema => 'float*',
-            default => 100,
-            description => <<'_',
-
-An account will not be used to create more buy order if its quote currency
-balance is below this value, or sell order if its base currency balance
-(denominated in quote currency) is below this value. If quote currency is fiat,
-will use USD.
-
-For example if you are arbitraging BTC against USD and IDR and set this option
-to 100, then account balance will be kept at 100 USD minimum.
-
-_
-            tags => ['category:limit', 'category:account'],
         },
     },
     features => {
@@ -762,6 +744,7 @@ sub arbit {
     my $r = $args{-cmdline_r};
     # XXX schema
     my $strategy = $args{strategy} // 'merge_order_book';
+    $args{min_profit_pct} > 0 or return [412, "Refusing to do arbitrage with no positive min_profit_pct"];
 
     my $res;
 
