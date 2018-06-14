@@ -35,6 +35,23 @@ sub _create_order_pairs {
         $_->{base_size} *= $max_order_size_as_book_item_size_pct/100;
     }
 
+    if ($account_balances && $min_account_balances) {
+        for my $e (keys %$account_balances) {
+            my $balances = $account_balances->{$e};
+            for my $cur (keys %$balances) {
+                my $curbalances = $balances->{$cur};
+                for my $rec (@$curbalances) {
+                    my $eacc = "$e/$rec->{account}";
+                    if (defined $min_account_balances->{$eacc} &&
+                            defined $min_account_balances->{$eacc}{$cur}) {
+                        $rec->{available} -= $min_account_balances->{$eacc}{$cur};
+                    }
+                }
+            }
+        }
+        App::cryp::arbit::_sort_account_balances($account_balances);
+    }
+
   CREATE:
     while (1) {
         last CREATE if defined $max_order_pairs &&

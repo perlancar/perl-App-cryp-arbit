@@ -976,7 +976,6 @@ subtest 'opt:max_order_quote_size' => sub {
         or diag explain $order_pairs;
 };
 
-L1:
 subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
     my $all_buy_orders = [
         {
@@ -1068,6 +1067,125 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
 
     is_deeply($order_pairs, $correct_order_pairs)
         or diag explain $order_pairs;
+};
+
+L1:
+subtest 'opt:min_account_balance' => sub {
+    my $all_buy_orders = [
+        {
+            base_size        => 0.2,
+            exchange         => "indodax",
+            gross_price      => 500.1,
+            gross_price_orig => 5001_000,
+            net_price        => 499.9,
+            net_price_orig   => 4999_000,
+            quote_currency   => "IDR",
+        },
+        {
+            base_size        => 0.9,
+            exchange         => "indodax",
+            gross_price      => 500.0,
+            gross_price_orig => 5000_000,
+            net_price        => 499.8,
+            net_price_orig   => 4998_000,
+            quote_currency   => "IDR",
+        },
+    ];
+
+    my $all_sell_orders = [
+        {
+            base_size        => 1,
+            exchange         => "gdax",
+            gross_price      => 491.1,
+            gross_price_orig => 491.1,
+            net_price        => 491.9,
+            net_price_orig   => 491.9,
+            quote_currency   => "USD",
+        },
+    ];
+
+    my $account_balances = {
+        indodax => {
+            ETH => [{account=>'i1', available=>0.15}, {account=>'i2', available=>1}, ],
+        },
+        gdax => {
+            USD => [{account=>'g1', available=>9999}],
+        },
+    };
+
+    my $min_account_balances = {
+        "indodax/i1" => {ETH => 0.02},
+        "indodax/i2" => {ETH => 0.98},
+    };
+
+    my $correct_order_pairs = [
+        {
+            base_size => 0.13,
+            buy => {
+                account => "g1",
+                exchange => "gdax",
+                gross_price => 491.1,
+                gross_price_orig => 491.1,
+                net_price => 491.9,
+                net_price_orig => 491.9,
+                pair => "ETH/USD",
+            },
+            profit => 1.04,
+            profit_pct => 1.62634681845904,
+            sell => {
+                account => "i1",
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+        {
+            base_size => 0.02,
+            buy => {
+                account => "g1",
+                exchange => "gdax",
+                gross_price => 491.1,
+                gross_price_orig => 491.1,
+                net_price => 491.9,
+                net_price_orig => 491.9,
+                pair => "ETH/USD",
+            },
+            profit => 0.16,
+            profit_pct => 1.62634681845904,
+            sell => {
+                account => "i2",
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+    ];
+
+    my $correct_final_account_balances = {
+        gdax => { USD => [{account=>'g1', available=>9925.335}] },
+        indodax => { ETH => [] },
+    };
+
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+        base_currency  => "ETH",
+        all_buy_orders    => $all_buy_orders,
+        all_sell_orders   => $all_sell_orders,
+        account_balances  => $account_balances,
+        min_account_balances => $min_account_balances,
+        min_profit_pct    => 0,
+    );
+
+    is_deeply($order_pairs, $correct_order_pairs)
+        or diag explain $order_pairs;
+
+    is_deeply($account_balances, $correct_final_account_balances)
+        or diag explain $account_balances;
 };
 
 
