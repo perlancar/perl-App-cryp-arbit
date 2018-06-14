@@ -32,6 +32,11 @@ sub _create_order_pairs {
     my $orders_quote_size = 0;
   CREATE:
     while (1) {
+        last CREATE if defined $max_order_pairs &&
+            @order_pairs >= $max_order_pairs;
+
+        last CREATE if defined $max_orders_quote_size &&
+            $orders_quote_size >= $max_orders_quote_size;
 
         my ($sell, $sell_index);
       FIND_BUYER:
@@ -103,6 +108,12 @@ sub _create_order_pairs {
             profit_pct => $profit_pct,
         };
 
+        if ($account_balances) {
+            $order_pairs[-1]{sell}{account} = $account_balances->{ $sell->{exchange} }{$base_currency}[0]{account};
+            $order_pairs[-1]{buy}{account}  = $account_balances->{ $buy ->{exchange} }{$buy->{quote_currency}}[0]{account};
+        }
+
+        # limit maximum size
         my @sizes = (
             {which => 'buy order' , size => $sell->{base_size}},
             {which => 'sell order', size => $buy ->{base_size}},
@@ -167,6 +178,7 @@ sub _create_order_pairs {
             ($order_pairs[-1]{sell}{net_price} - $order_pairs[-1]{buy}{net_price});
 
         $orders_quote_size += $order_size * $order_pairs[-1]{sell}{gross_price};
+
     } # CREATE
 
     \@order_pairs;
@@ -191,8 +203,9 @@ sub create_order_pairs {
     my %pairs_for;     # key=exchange safename, val=[pair, ...]
   DETERMINE_SETS:
     for my $exchange (sort keys %{ $r->{_stash}{exchange_clients} }) {
-        my $pairs = $r->{_stash}{exchange_pairs}{$exchange};
-        for my $pair (@$pairs) {
+        my $pair_recs = $r->{_stash}{exchange_pairs}{$exchange};
+        for my $pair_rec (@$pair_recs) {
+            my $pair = $pair_rec->{name};
             my ($basecur, $quotecur) = $pair =~ m!(.+)/(.+)!;
             next unless grep { $_ eq $basecur  } @{ $r->{_stash}{base_currencies}  };
             next unless grep { $_ eq $quotecur } @{ $r->{_stash}{quote_currencies} };
@@ -408,7 +421,6 @@ sub create_order_pairs {
 
         log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
         log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
-        exit;
 
         my $coin_order_pairs = _create_order_pairs(
             base_currency => $base_currency,
@@ -417,7 +429,7 @@ sub create_order_pairs {
             min_profit_pct => $r->{args}{min_profit_pct},
             max_orders_amount => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_orders_amount_per_round},
             max_order_pairs   => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_pairs_per_round},
-            (account_balances => $r->{_stash}{account_balances}) x !!$r->{args}{disregard_balance},
+            (account_balances => $r->{_stash}{account_balances}) x !$r->{args}{disregard_balance},
         );
         push @order_pairs, @$coin_order_pairs;
     } # for set (base currency)
@@ -547,13 +559,53 @@ section:
 
 =item * max_orders_quote_size_per_round
 
-Number, in USD. Default is unlimited. The total amount (in USD) of order pairs
-per order book matching. Note that this size is on a per-coin basis. Default is
-unlimited.
+Number, in quote currency. Default is unlimited. The total amount of order pairs
+per round, where a round consists of matching order books from all exchanges.
+Note that this size is on a per-base-currency basis.
 
 =item * max_order_pairs_per_round
 
-Number. Default is unlimited.
+Positive number. Default is unlimited. The maximum number of order pairs to
+create per round. Note that this size is on a per-base-currency basis.
+
+=item * max_order_size_as_book_item_size_pct
+
+Number 0-100. Default is 100. This setting is used for more safety since order
+books are rapidly changing. For example, there is an item in the merged order
+book as follows:
+
+ type  exchange   price  amount   item#
+ ----  --------   -----  ------   -----
+ buy   exchange1  800.1  12       B1
+ buy   exchange1  798.1  24       B2
+ ...
+ sell  exchange2  780.1   5       S1
+ sell  exchange2  782.9   8       S2
+ ...
+
+If `max_order_size_as_book_item_size_pct` is set to 100, then this will create
+order pairs as follows:
+
+ size  buy from   buy price  sell to    sell price  item#
+ ----  --------   ---------  -------    ----------  -----
+ 5     exchange2  780.1      exchange1  800.1       OP1
+ 7     exchange2  782.9      exchange1  800.1       OP2
+ ...
+
+The OP1 will use up (100%) of item #S1 from the order book, then OP2 will use up
+(100%) item #B1 from the order book.
+
+However, if `max_order_size_as_book_item_size_pct` is set to 75, then this will
+create order pairs as follows:
+
+ size  buy from   buy price  sell to    sell price  item#
+ ----  --------   ---------  -------    ----------  -----
+ 3.75  exchange2  780.1      exchange1  800.1       OP1
+ 5.25  exchange2  782.9      exchange1  800.1       OP2
+
+OP1 will use 75% item S1 from the order book, then the strategy will move on to
+the next sell order (S2). OP2 will also use only 75% of item B1 (3.75 + 5.25 =
+9, which is 75% of 12) before moving on to the next buy order.
 
 =back
 

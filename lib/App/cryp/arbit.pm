@@ -305,7 +305,7 @@ sub _get_exchange_pairs {
     my $clients = $r->{_stash}{exchange_clients}{$exchange};
     my $client = $clients->{ (sort keys %$clients)[0] };
 
-    my $res = $client->list_pairs;
+    my $res = $client->list_pairs(detail=>1);
     if ($res->[0] == 200) {
         $r->{_stash}{exchange_pairs}{$exchange} = $res->[2];
     } else {
@@ -436,8 +436,9 @@ sub _init_arbit {
             # pick first account
             my $acc = (sort keys %$clients)[0];
             my $client = $clients->{$acc};
-            my $pairs = _get_exchange_pairs($r, $e);
-            for my $pair (@$pairs) {
+            my $pair_recs = _get_exchange_pairs($r, $e);
+            for my $pair_rec (@$pair_recs) {
+                my $pair = $pair_rec->{name};
                 my ($basecur, $quotecur) = split m!/!, $pair;
                 # consider all fiat currencies as a single ":fiat" because we
                 # assume fiat currencies can be converted from one to the aother
@@ -499,8 +500,9 @@ sub _init_arbit {
             # pick first account
             my $acc = (sort keys %$clients)[0];
             my $client = $clients->{$acc};
-            my $pairs = _get_exchange_pairs($r, $e);
-            for my $pair (@$pairs) {
+            my $pair_recs = _get_exchange_pairs($r, $e);
+            for my $pair_rec (@$pair_recs) {
+                my $pair = $pair_rec->{name};
                 my ($basecur, $quotecur) = split m!/!, $pair;
                 next unless grep { $_ eq $quotecur } @{ $r->{_stash}{quote_currencies} };
                 $basecur_exchanges{$basecur}{$e} = 1;
@@ -637,7 +639,7 @@ sub show {
 
     my $resmeta = {};
     $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_net_price', 'buy_gross_price_usd', 'buy_net_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_net_price', 'sell_gross_price_usd', 'sell_net_price_usd', 'profit_pct', 'profit_currency', 'profit'];
-    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_pross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
+    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_gross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
     $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,          $fnum8,                $fnum8,              undef,     undef,           $fnum8,             $fnum8,           $fnum8,                 $fnum8,               $fnum4,       undef,             $fnum8];
     $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',         'right',               'right',             'left',    'left',          'right',            'right',          'right',                'right',              'right',      'left',            'right'];
 
@@ -686,7 +688,7 @@ _
                 'before cancelling them (in seconds)',
             schema => 'posint*',
             default => 2*60,
-            tags => ['category:timing'],
+            tags => ['category:limit', 'category:order-pair'],
             description => <<'_',
 
 Sometimes because of rapid trading and price movement, our order might not be
@@ -707,28 +709,47 @@ Below this percentage number, no order pairs will be made to do the arbitrage.
 Note that the price difference that will be considered is the *net* price
 difference (after subtracted by trading fees).
 
-See also: `max_order_amount`.
-
 _
-            tags => ['category:profit-setting'],
+            tags => ['category:profit'],
         },
-        max_order_amount => {
-            summary => 'What is the maximum amount of a single order (in USD)',
+        max_order_quote_size => {
+            summary => 'What is the maximum amount of a single order',
             schema => 'float*',
             default => 100,
             description => <<'_',
 
-A single order will be limited to not be above this value (in USD). This is the
-amount for the selling (because an arbitrage transaction is comprised of a pair
-of orders, where one order is a selling order at a higher USD amount than the
-buying order).
+A single order will be limited to not be above this value (in quote currency,
+which if fiat will be converted to USD). This is the amount for the selling
+(because an arbitrage transaction is comprised of a pair of orders, where one
+order is a selling order at a higher quote currency size than the buying order).
 
-Note that order amount can also be smaller due to: 1) insufficient demand (when
+For example if you are arbitraging BTC against USD and IDR, and set this option
+to 50, then orders will not be below 50 USD. If you are arbitraging LTC against
+BTC and set this to 0.01 then orders will not be below 0.01 BTC.
+
+Note that order size can also be smaller due to: 1) insufficient demand (when
 selling) or supply (when buying) in the order book; 2) insufficient balance of
 the inventory.
 
 _
-            tags => ['category:trading'],
+            tags => ['category:limit', 'category:order'],
+        },
+        min_account_balance => {
+            summary => 'What is the minimum account balance',
+            schema => 'float*',
+            default => 100,
+            description => <<'_',
+
+An account will not be used to create more buy order if its quote currency
+balance is below this value, or sell order if its base currency balance
+(denominated in quote currency) is below this value. If quote currency is fiat,
+will use USD.
+
+For example if you are arbitraging BTC against USD and IDR and set this option
+to 100, then account balance will be kept at 100 USD minimum.
+
+_
+            tags => ['category:limit', 'category:account'],
         },
     },
     features => {
