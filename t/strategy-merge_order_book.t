@@ -7,8 +7,6 @@ use Test::More 0.98;
 
 use App::cryp::arbit::Strategy::merge_order_book;
 
-goto L1;
-
 subtest 'opt:min_profit_pct' => sub {
     my $all_buy_orders = [
         {
@@ -1069,7 +1067,6 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
         or diag explain $order_pairs;
 };
 
-L1:
 subtest 'opt:min_account_balance' => sub {
     my $all_buy_orders = [
         {
@@ -1188,6 +1185,301 @@ subtest 'opt:min_account_balance' => sub {
         or diag explain $account_balances;
 };
 
+subtest "minimum buy base size" => sub {
+    my $all_buy_orders = [
+        {
+            base_size        => 1,
+            exchange         => "indodax",
+            gross_price      => 500.1,
+            gross_price_orig => 5001_000,
+            net_price        => 499.9,
+            net_price_orig   => 4999_000,
+            quote_currency   => "IDR",
+        },
+    ];
+
+    my $all_sell_orders = [
+        {
+            base_size        => 0.2,
+            exchange         => "gdax",
+            gross_price      => 491.1,
+            gross_price_orig => 491.1,
+            net_price        => 491.9,
+            net_price_orig   => 491.9,
+            quote_currency   => "USD",
+        },
+        {
+            base_size        => 0.9,
+            exchange         => "gdax",
+            gross_price      => 493.0,
+            gross_price_orig => 493.0,
+            net_price        => 494.0,
+            net_price_orig   => 494.0,
+            quote_currency   => "USD",
+        },
+    ];
+
+    my $correct_order_pairs = [
+        {
+            base_size => 0.8,
+            buy => {
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 4.71999999999998,
+            profit_pct => 1.19433198380566,
+            sell => {
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+    ];
+
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+        base_currency  => "ETH",
+        all_buy_orders    => $all_buy_orders,
+        all_sell_orders   => $all_sell_orders,
+        min_profit_pct    => 0,
+        exchange_pairs    => {
+            gdax => [{name=>"ETH", min_base_size=>0.5}],
+        },
+    );
+
+    #use DD; dd $order_pairs;
+
+    is_deeply($order_pairs, $correct_order_pairs)
+        or diag explain $order_pairs;
+};
+
+subtest "minimum buy quote size" => sub {
+    my $all_buy_orders = [
+        {
+            base_size        => 1,
+            exchange         => "indodax",
+            gross_price      => 500.1,
+            gross_price_orig => 5001_000,
+            net_price        => 499.9,
+            net_price_orig   => 4999_000,
+            quote_currency   => "IDR",
+        },
+    ];
+
+    my $all_sell_orders = [
+        {
+            base_size        => 0.2,
+            exchange         => "gdax",
+            gross_price      => 491.1,
+            gross_price_orig => 491.1,
+            net_price        => 491.9,
+            net_price_orig   => 491.9,
+            quote_currency   => "USD",
+        },
+        {
+            base_size        => 0.9,
+            exchange         => "gdax",
+            gross_price      => 493.0,
+            gross_price_orig => 493.0,
+            net_price        => 494.0,
+            net_price_orig   => 494.0,
+            quote_currency   => "USD",
+        },
+    ];
+
+    my $correct_order_pairs = [
+        {
+            base_size => 0.8,
+            buy => {
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 4.71999999999998,
+            profit_pct => 1.19433198380566,
+            sell => {
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+    ];
+
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+        base_currency  => "ETH",
+        all_buy_orders    => $all_buy_orders,
+        all_sell_orders   => $all_sell_orders,
+        min_profit_pct    => 0,
+        exchange_pairs    => {
+            gdax => [{name=>"ETH", min_quote_size=>200}],
+        },
+    );
+
+    #use DD; dd $order_pairs;
+
+    is_deeply($order_pairs, $correct_order_pairs)
+        or diag explain $order_pairs;
+};
+
+subtest "minimum sell base size" => sub {
+    my $all_buy_orders = [
+        {
+            base_size        => 1,
+            exchange         => "indodax",
+            gross_price      => 500.1,
+            gross_price_orig => 5001_000,
+            net_price        => 499.9,
+            net_price_orig   => 4999_000,
+            quote_currency   => "IDR",
+        },
+    ];
+
+    my $all_sell_orders = [
+        {
+            base_size        => 0.2,
+            exchange         => "gdax",
+            gross_price      => 491.1,
+            gross_price_orig => 491.1,
+            net_price        => 491.9,
+            net_price_orig   => 491.9,
+            quote_currency   => "USD",
+        },
+        {
+            base_size        => 0.9,
+            exchange         => "gdax",
+            gross_price      => 493.0,
+            gross_price_orig => 493.0,
+            net_price        => 494.0,
+            net_price_orig   => 494.0,
+            quote_currency   => "USD",
+        },
+    ];
+
+    my $correct_order_pairs = [
+        {
+            base_size => 0.8,
+            buy => {
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 4.71999999999998,
+            profit_pct => 1.19433198380566,
+            sell => {
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+    ];
+
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+        base_currency  => "ETH",
+        all_buy_orders    => $all_buy_orders,
+        all_sell_orders   => $all_sell_orders,
+        min_profit_pct    => 0,
+        exchange_pairs    => {
+            indodax => [{name=>"ETH", min_base_size=>0.5}],
+        },
+    );
+
+    #use DD; dd $order_pairs;
+
+    is_deeply($order_pairs, $correct_order_pairs)
+        or diag explain $order_pairs;
+};
+
+subtest "minimum sell quote size" => sub {
+    my $all_buy_orders = [
+        {
+            base_size        => 1,
+            exchange         => "indodax",
+            gross_price      => 500.1,
+            gross_price_orig => 5001_000,
+            net_price        => 499.9,
+            net_price_orig   => 4999_000,
+            quote_currency   => "IDR",
+        },
+    ];
+
+    my $all_sell_orders = [
+        {
+            base_size        => 0.2,
+            exchange         => "gdax",
+            gross_price      => 491.1,
+            gross_price_orig => 491.1,
+            net_price        => 491.9,
+            net_price_orig   => 491.9,
+            quote_currency   => "USD",
+        },
+        {
+            base_size        => 0.9,
+            exchange         => "gdax",
+            gross_price      => 493.0,
+            gross_price_orig => 493.0,
+            net_price        => 494.0,
+            net_price_orig   => 494.0,
+            quote_currency   => "USD",
+        },
+    ];
+
+    my $correct_order_pairs = [
+        {
+            base_size => 0.8,
+            buy => {
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 4.71999999999998,
+            profit_pct => 1.19433198380566,
+            sell => {
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
+    ];
+
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+        base_currency  => "ETH",
+        all_buy_orders    => $all_buy_orders,
+        all_sell_orders   => $all_sell_orders,
+        min_profit_pct    => 0,
+        exchange_pairs    => {
+            indodax => [{name=>"ETH", min_quote_size=>200}],
+        },
+    );
+
+    #use DD; dd $order_pairs;
+
+    is_deeply($order_pairs, $correct_order_pairs)
+        or diag explain $order_pairs;
+};
 
 DONE_TESTING:
 done_testing;

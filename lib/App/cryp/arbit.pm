@@ -831,7 +831,7 @@ passing C<$r> around. The keys that are used by routines in this module:
    {exchange_ids}              # key=exchange safename, value=exchange (numeric) ID from db
    {exchange_recs}             # key=exchange safename, value=hash (from CryptoExchange::Catalog)
    {exchange_coins}            # key=exchange safename, value=[COIN1, COIN2, ...]
-   {exchange_pairs}            # key=exchange safename, value=[PAIR1, PAIR2, ...]
+   {exchange_pairs}            # key=exchange safename, value=[{name=>PAIR1, min_base_size=>..., min_quote_size=>...}, ...]
    {quote_currencies}          # what currencies we use to buy/sell the base currencies
    {quote_currencies_for}      # key=base currency, value={quotecurrency1 => 1, quotecurrency2=>1, ...}
    {trading_fees}              # key=exchange safename, value={coin1=>num (in percent) market taker fees, ...}, ':default' for all other coins, ':default' for all other exchanges
