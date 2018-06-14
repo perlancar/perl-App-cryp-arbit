@@ -209,20 +209,20 @@ sub _create_order_pairs {
             last unless $pair_recs;
             my $pair_rec;
             for (@$pair_recs) {
-                if ($_->{name} eq $base_currency) {
+                if ($_->{base_currency} eq $base_currency) {
                     $pair_rec = $_; last;
                 }
             }
             last unless $pair_rec;
-            if (defined $pair_rec->{min_base_size} && $order_pair->{base_size} < $pair_rec->{min_base_size}) {
-                log_trace "buy order base size is too small (%.4f < %.4f), skipping this order pair: %s",
-                    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
+            if (defined($pair_rec->{min_base_size}) && $order_pair->{base_size} < $pair_rec->{min_base_size}) {
+                #log_trace "buy order base size is too small (%.4f < %.4f), skipping this order pair: %s",
+                #    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
                 next CREATE;
             }
-            my $quote_size = $order_pair->{base_size}*$buy->{gross_price};
-            if (defined $pair_rec->{min_quote_size} && $quote_size < $pair_rec->{min_quote_size}) {
-                log_trace "buy order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
-                    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
+            my $quote_size = $order_pair->{base_size}*$buy->{gross_price_orig};
+            if (defined($pair_rec->{min_quote_size}) && $quote_size < $pair_rec->{min_quote_size}) {
+                #log_trace "buy order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
+                #    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
                 next CREATE;
             }
         } # CHECK_MINIMUM_BUY_SIZE
@@ -234,20 +234,20 @@ sub _create_order_pairs {
             last unless $pair_recs;
             my $pair_rec;
             for (@$pair_recs) {
-                if ($_->{name} eq $base_currency) {
+                if ($_->{base_currency} eq $base_currency) {
                     $pair_rec = $_; last;
                 }
             }
             last unless $pair_rec;
             if (defined $pair_rec->{min_base_size} && $order_pair->{base_size} < $pair_rec->{min_base_size}) {
-                log_trace "sell order base size is too small (%.4f < %.4f), skipping this order pair: %s",
-                    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
+                #log_trace "sell order base size is too small (%.4f < %.4f), skipping this order pair: %s",
+                #    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
                 next CREATE;
             }
-            my $quote_size = $order_pair->{base_size}*$sell->{gross_price};
+            my $quote_size = $order_pair->{base_size}*$sell->{gross_price_orig};
             if (defined $pair_rec->{min_quote_size} && $quote_size < $pair_rec->{min_quote_size}) {
-                log_trace "sell order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
-                    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
+                #log_trace "sell order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
+                #    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
                 next CREATE;
             }
         } # CHECK_MINIMUM_SELL_SIZE
@@ -269,7 +269,7 @@ sub create_order_pairs {
 
   GET_ACCOUNT_BALANCES:
     {
-        last if $r->{args}{disregard_balance};
+        last if $r->{args}{ignore_balance};
         App::cryp::arbit::_get_account_balances($r, 'no-cache');
     } # GET_ACCOUNT_BALANCES
 
@@ -505,9 +505,9 @@ sub create_order_pairs {
             max_order_quote_size => $r->{args}{max_order_quote_size},
             max_order_size_as_book_item_size_pct => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_size_as_book_item_size_pct},
             max_order_pairs      => $r->{args}{max_order_pairs_per_round},
-            (account_balances    => $r->{_stash}{account_balances}) x !$r->{args}{disregard_balance},
+            (account_balances    => $r->{_stash}{account_balances}) x !$r->{args}{ignore_balance},
             min_account_balances => $r->{args}{min_account_balances},
-            exchange_pairs       => $r->{_stash}{exchange_pairs},
+            (exchange_pairs       => $r->{_stash}{exchange_pairs}) x !$r->{args}{ignore_min_order_size}
         );
         push @order_pairs, @$coin_order_pairs;
     } # for set (base currency)

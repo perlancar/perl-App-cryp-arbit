@@ -1249,7 +1249,7 @@ subtest "minimum buy base size" => sub {
         all_sell_orders   => $all_sell_orders,
         min_profit_pct    => 0,
         exchange_pairs    => {
-            gdax => [{name=>"ETH", min_base_size=>0.5}],
+            gdax => [{base_currency=>"ETH", min_base_size=>0.5}],
         },
     );
 
@@ -1323,7 +1323,7 @@ subtest "minimum buy quote size" => sub {
         all_sell_orders   => $all_sell_orders,
         min_profit_pct    => 0,
         exchange_pairs    => {
-            gdax => [{name=>"ETH", min_quote_size=>200}],
+            gdax => [{base_currency=>"ETH", min_quote_size=>200}],
         },
     );
 
@@ -1397,7 +1397,7 @@ subtest "minimum sell base size" => sub {
         all_sell_orders   => $all_sell_orders,
         min_profit_pct    => 0,
         exchange_pairs    => {
-            indodax => [{name=>"ETH", min_base_size=>0.5}],
+            indodax => [{base_currency=>"ETH", min_base_size=>0.5}],
         },
     );
 
@@ -1471,7 +1471,7 @@ subtest "minimum sell quote size" => sub {
         all_sell_orders   => $all_sell_orders,
         min_profit_pct    => 0,
         exchange_pairs    => {
-            indodax => [{name=>"ETH", min_quote_size=>200}],
+            indodax => [{base_currency=>"ETH", min_quote_size=>200}],
         },
     );
 

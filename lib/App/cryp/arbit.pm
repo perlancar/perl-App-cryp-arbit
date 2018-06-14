@@ -612,8 +612,13 @@ $SPEC{show} = {
     args => {
         %args_db,
         %args_arbit_common,
-        disregard_balance => {
-            summary => 'Disregard account balances',
+        ignore_balance => {
+            summary => 'Ignore account balances',
+            schema => 'bool*',
+            default => 0,
+        },
+        ignore_min_order_size => {
+            summary => 'Ignore minimum order size limitation from exchanges',
             schema => 'bool*',
             default => 0,
         },
