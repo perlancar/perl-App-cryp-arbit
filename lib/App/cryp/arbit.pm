@@ -237,8 +237,23 @@ sub _get_account_id {
     $aid;
 }
 
+sub _sort_account_balances {
+    my $account_balances = shift;
+
+    for my $e (keys %$account_balances) {
+        my $balances = $account_balances->{$e};
+        for my $cur (keys %$balances) {
+            $balances->{$cur} = [
+                grep { $_->{available} >= 1e-8 }
+                    sort { $b->{available} <=> $a->{available} }
+                    @{ $balances->{$cur} }
+                ];
+        }
+    }
+}
+
 sub _get_account_balances {
-    my $r = shift;
+    my ($r, $no_cache) = @_;
 
     my $dbh = $r->{_stash}{dbh};
     $r->{_stash}{account_balances} = {};
@@ -256,8 +271,10 @@ sub _get_account_balances {
                     $e, $acc, $res;
                 next ACC;
             }
-            $r->{_stash}{account_balances}{$e}{$a} = $res->[2];
             for my $rec (@{ $res->[2] }) {
+                $rec->{account} = $acc;
+                $rec->{account_id} = $aid;
+                push @{ $r->{_stash}{account_balances}{$e}{$rec->{currency}} }, $rec;
                 $dbh->do(
                     "REPLACE INTO latest_balance (time, account_id, currency, available) VALUES (?,?,?,?)",
                     {},
@@ -272,6 +289,10 @@ sub _get_account_balances {
         } # for account
     } # for exchange
 
+    # sort by largest available balance first
+    _sort_account_balances($r->{_stash}{account_balances});
+
+    #log_trace "account_balances: %s", $r->{_stash}{account_balances};
     $r->{_stash}{account_balances};
 }
 
@@ -552,6 +573,11 @@ $SPEC{show} = {
             schema => 'float*',
             default => 0,
         },
+        disregard_balance => {
+            summary => 'Disregard account balances',
+            schema => 'bool*',
+            default => 0,
+        },
     },
 };
 sub show {
@@ -573,7 +599,7 @@ sub show {
     $res = $strategy_mod->create_order_pairs(r => $r);
     return $res unless $res->[0] == 200;
 
-    log_trace "order pairs: %s", $res->[2];
+    #log_trace "order pairs: %s", $res->[2];
 
     # format for table display
     my @res;
@@ -793,7 +819,7 @@ passing C<$r> around. The keys that are used by routines in this module:
 
  $r->{_stash}
    {dbh}
-   {account_balances}          # key=exchange safename, value={account1 => [{currency=>CUR1, available=>..., ...}, {...}], ...}
+   {account_balances}          # key=exchange safename, value={currency1 => [{account=>account1, account_id=>aid, available=>..., ...}, {...}]}. value->{currency} sorted by largest available balance first
    {account_exchanges}         # key=exchange safename, value={account1 => 1, ...}
    {account_ids}               # key=exchange safename, value={account1 => numeric ID from db, ...}
    {base_currencies}           # target (crypto)currencies to arbitrage

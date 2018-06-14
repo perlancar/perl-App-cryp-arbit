@@ -25,32 +25,55 @@ sub _create_order_pairs {
     my $min_profit_pct        = $args{min_profit_pct} // 0;
     my $max_orders_quote_size = $args{max_orders_quote_size};
     my $max_order_pairs       = $args{max_order_pairs};
+    my $account_balances      = $args{account_balances};
 
     my @order_pairs;
 
     my $orders_quote_size = 0;
   CREATE:
     while (1) {
-        last unless @$all_buy_orders;
 
-        # let's take a look at the highest buyer that we can sell to
-        my $sell = $all_buy_orders->[0];
-
-        # find cheaper sellers to buy from
-        last unless @$all_sell_orders;
-
-        my $i = 0;
-        my $buy;
-        while ($i < @$all_sell_orders) {
-            $buy = $all_sell_orders->[$i];
-            # shouldn't happen though
-            if ($buy->{exchange} eq $sell->{exchange}) {
-                $i++; next;
+        my ($sell, $sell_index);
+      FIND_BUYER:
+        {
+            $sell_index = 0;
+            while ($sell_index < @$all_buy_orders) {
+                $sell = $all_buy_orders->[$sell_index];
+                if ($account_balances) {
+                    # we don't have any inventory left to sell on this selling
+                    # exchange
+                    unless (@{ $account_balances->{ $sell->{exchange} }{$base_currency} }) {
+                        $sell_index++; next;
+                    }
+                }
+                last;
             }
-            last;
+            # there are no more buyers left we can sell to
+            last CREATE unless $sell_index < @$all_buy_orders;
         }
-        # exit when we can no longer find any seller we can buy chaper coin from
-        last CREATE unless $i < @$all_sell_orders;
+
+        my ($buy, $buy_index);
+      FIND_SELLER:
+        {
+            $buy_index = 0;
+            while ($buy_index < @$all_sell_orders) {
+                $buy = $all_sell_orders->[$buy_index];
+                # shouldn't happen though
+                if ($buy->{exchange} eq $sell->{exchange}) {
+                    $buy_index++; next;
+                }
+                if ($account_balances) {
+                    # we don't have any inventory left to buy from this exchange
+                    unless (@{ $account_balances->{ $buy->{exchange} }{$buy->{quote_currency}} }) {
+                        $buy_index++; next;
+                    }
+                }
+                last;
+            }
+            # there are no more sellers left we can buy from
+            last CREATE unless $buy_index < @$all_sell_orders;
+        }
+
         my $smaller_price = min($sell->{net_price}, $buy->{net_price});
         my $profit_pct    = ($sell->{net_price} - $buy->{net_price}) /
             $smaller_price * 100;
@@ -79,31 +102,71 @@ sub _create_order_pairs {
             },
             profit_pct => $profit_pct,
         };
-        if ($sell->{base_size} < $buy->{base_size}) {
-            # we used up all amount from buy order from orderbook at this price,
-            # remove from orderbook
-            $order_pairs[-1]{base_size}  = $sell->{base_size};
 
-            shift @$all_buy_orders;
-            $all_sell_orders->[$i]{base_size} -= $sell->{base_size};
-            splice @$all_sell_orders, $i, 1
-                if abs($all_sell_orders->[$i]{base_size}) < 1e-8;
-        } else {
-            # we used up all amount from sell order from orderbook at this
-            # price, remove from orderbook
-            $order_pairs[-1]{base_size}  = $buy->{base_size};
-
-            splice @$all_sell_orders, $i, 1;
-            $all_buy_orders->[0]{base_size} -= $buy->{base_size};
-            shift @$all_buy_orders
-                if abs($all_buy_orders->[0]{base_size}) < 1e-8;
+        my @sizes = (
+            {which => 'buy order' , size => $sell->{base_size}},
+            {which => 'sell order', size => $buy ->{base_size}},
+        );
+        if ($account_balances) {
+            push @sizes, (
+                {
+                    which => 'sell exchange balance',
+                    size => $account_balances->{ $sell->{exchange} }{$base_currency}[0]{available},
+                },
+                {
+                    which => 'buy exchange balance',
+                    size => $account_balances->{ $buy ->{exchange} }{$buy->{quote_currency}}[0]{available}
+                        / $buy->{gross_price_orig},
+                },
+            );
         }
-        $order_pairs[-1]{profit}   = $order_pairs[-1]{base_size} *
+        @sizes = sort { $a->{size} <=> $b->{size} } @sizes;
+        my $order_size = $sizes[0]{size};
+
+      UPDATE_INVENTORY_BALANCES:
+        for my $i (0..$#sizes) {
+            my $size  = $sizes[$i]{size};
+            my $which = $sizes[$i]{which};
+            my $used_up = $size - $order_size <= 1e-8;
+            if ($which eq 'buy order') {
+                if ($used_up) {
+                    splice @$all_buy_orders, $sell_index, 1;
+                } else {
+                    $all_buy_orders->[$sell_index]{base_size} -= $order_size;
+                }
+            } elsif ($which eq 'sell order') {
+                if ($used_up) {
+                    splice @$all_sell_orders, $buy_index, 1;
+                } else {
+                    $all_sell_orders->[$buy_index]{base_size} -= $order_size;
+                }
+            } elsif ($which eq 'sell exchange balance') {
+                if ($used_up) {
+                    shift @{ $account_balances->{ $sell->{exchange} }{$base_currency} };
+                } else {
+                    $account_balances->{ $sell->{exchange} }{$base_currency}[0]{available} -=
+                        $order_size;
+                }
+            } elsif ($which eq 'buy exchange balance') {
+                my $c = $buy->{quote_currency};
+                if ($used_up) {
+                    shift @{ $account_balances->{ $buy->{exchange} }{$c} };
+                } else {
+                    $account_balances->{ $buy->{exchange} }{$c}[0]{available} -=
+                        $order_size * $buy->{gross_price_orig};
+                }
+            }
+        } # UPDATE_INVENTORY_BALANCES
+
+        if ($account_balances) {
+            App::cryp::arbit::_sort_account_balances($account_balances);
+        }
+
+        $order_pairs[-1]{base_size} = $order_size;
+        $order_pairs[-1]{profit}   = $order_size *
             ($order_pairs[-1]{sell}{net_price} - $order_pairs[-1]{buy}{net_price});
 
-        $orders_quote_size += $order_pairs[-1]{base_size} *
-            $order_pairs[-1]{sell}{gross_price};
-
+        $orders_quote_size += $order_size * $order_pairs[-1]{sell}{gross_price};
     } # CREATE
 
     \@order_pairs;
@@ -116,6 +179,12 @@ sub create_order_pairs {
     my $dbh = $r->{_stash}{dbh};
 
     my @order_pairs;
+
+  GET_ACCOUNT_BALANCES:
+    {
+        last if $r->{args}{disregard_balance};
+        App::cryp::arbit::_get_account_balances($r, 'no-cache');
+    } # GET_ACCOUNT_BALANCES
 
     my %exchanges_for; # key="base currency"/"quote cryptocurrency or ':fiat'", value => [exchange, ...]
     my %fiat_for;      # key=exchange safename, val=[fiat currency, ...]
@@ -144,9 +213,7 @@ sub create_order_pairs {
             push @{ $pairs_for{$exchange} }, $pair
                 unless grep { $_ eq $pair } @{ $pairs_for{$exchange} };
         }
-    }
-
-    #my $accbals = App::cryp::arbit::_get_account_balances($r);
+    } # DETERMINE_SETS
 
   SET:
     for my $set (sort keys %exchanges_for) {
@@ -341,6 +408,7 @@ sub create_order_pairs {
 
         log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
         log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
+        exit;
 
         my $coin_order_pairs = _create_order_pairs(
             base_currency => $base_currency,
@@ -349,6 +417,7 @@ sub create_order_pairs {
             min_profit_pct => $r->{args}{min_profit_pct},
             max_orders_amount => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_orders_amount_per_round},
             max_order_pairs   => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_pairs_per_round},
+            (account_balances => $r->{_stash}{account_balances}) x !!$r->{args}{disregard_balance},
         );
         push @order_pairs, @$coin_order_pairs;
     } # for set (base currency)
