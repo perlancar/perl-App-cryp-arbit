@@ -25,10 +25,15 @@ sub _create_order_pairs {
     my $min_profit_pct        = $args{min_profit_pct} // 0;
     my $max_order_quote_size  = $args{max_order_quote_size};
     my $max_order_pairs       = $args{max_order_pairs};
+    my $max_order_size_as_book_item_size_pct = $args{max_order_size_as_book_item_size_pct} // 100;
     my $account_balances      = $args{account_balances};
     my $min_account_balances  = $args{min_account_balances};
 
     my @order_pairs;
+
+    for (@{ $all_buy_orders }, @{ $all_sell_orders }) {
+        $_->{base_size} *= $max_order_size_as_book_item_size_pct/100;
+    }
 
   CREATE:
     while (1) {
@@ -428,6 +433,7 @@ sub create_order_pairs {
             all_sell_orders => \@all_sell_orders,
             min_profit_pct => $r->{args}{min_profit_pct},
             max_order_quote_size => $r->{args}{max_order_quote_size},
+            max_order_size_as_book_item_size_pct => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_size_as_book_item_size_pct},
             max_order_pairs      => $r->{args}{max_order_pairs_per_round},
             (account_balances    => $r->{_stash}{account_balances}) x !$r->{args}{disregard_balance},
             min_account_balances => $r->{args}{min_account_balances},
