@@ -11,12 +11,13 @@ use Log::ger;
 require App::cryp::arbit;
 use Finance::Currency::FiatX;
 use List::Util qw(min max);
+use Storable qw(dclone);
 
 use Role::Tiny::With;
 
 with 'App::cryp::Role::ArbitStrategy';
 
-sub _create_order_pairs {
+sub _calculate_order_pairs_for_base_currency {
     my %args = @_;
 
     my $base_currency         = $args{base_currency};
@@ -259,7 +260,7 @@ sub _create_order_pairs {
     \@order_pairs;
 }
 
-sub create_order_pairs {
+sub calculate_order_pairs {
     my ($pkg, %args) = @_;
 
     my $r = $args{r};
@@ -302,6 +303,19 @@ sub create_order_pairs {
                 unless grep { $_ eq $pair } @{ $pairs_for{$exchange} };
         }
     } # DETERMINE_SETS
+
+    # since we're doing N sets, split the balance fairly for each set
+    my $account_balances = dclone($r->{_stash}{account_balances});
+    my $num_sets = keys %exchanges_for;
+    for my $e (keys %$account_balances) {
+        my $balances = $account_balances->{$e};
+        for my $cur (keys %$balances) {
+            my $recs = $balances->{$cur};
+            for my $rec (@$recs) {
+                $rec->{available} /= $num_sets;
+            }
+        }
+    }
 
   SET:
     for my $set (sort keys %exchanges_for) {
@@ -494,10 +508,10 @@ sub create_order_pairs {
         @all_sell_orders = sort { $a->{net_price} <=> $b->{net_price} }
             @all_sell_orders;
 
-        log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
-        log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
+        #log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
+        #log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
 
-        my $coin_order_pairs = _create_order_pairs(
+        my $coin_order_pairs = _calculate_order_pairs_for_base_currency(
             base_currency => $base_currency,
             all_buy_orders => \@all_buy_orders,
             all_sell_orders => \@all_sell_orders,
@@ -505,10 +519,13 @@ sub create_order_pairs {
             max_order_quote_size => $r->{args}{max_order_quote_size},
             max_order_size_as_book_item_size_pct => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_size_as_book_item_size_pct},
             max_order_pairs      => $r->{args}{max_order_pairs_per_round},
-            (account_balances    => $r->{_stash}{account_balances}) x !$r->{args}{ignore_balance},
+            (account_balances    => $account_balances) x !$r->{args}{ignore_balance},
             min_account_balances => $r->{args}{min_account_balances},
             (exchange_pairs       => $r->{_stash}{exchange_pairs}) x !$r->{args}{ignore_min_order_size}
         );
+        for (@$coin_order_pairs) {
+            $_->{base_currency} = $base_currency;
+        }
         push @order_pairs, @$coin_order_pairs;
     } # for set (base currency)
 

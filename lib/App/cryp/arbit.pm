@@ -133,6 +133,23 @@ _
     },
 );
 
+our %arg_max_order_age = (
+    max_order_age => {
+        summary => 'How long should we wait for orders to be completed '.
+            'before cancelling them (in seconds)',
+        schema => 'posint*',
+        default => 3600,
+        description => <<'_',
+
+Sometimes because of rapid trading and price movement, our order might not be
+filled immediately. This setting sets a limit on how long should an order be
+left open. After this limit is reached, we cancel the order. The imbalance of
+the arbitrage transaction will be recorded.
+
+_
+    },
+);
+
 our $db_schema_spec = {
     component_name => 'cryp_arbit',
     latest_v => 1,
@@ -189,38 +206,56 @@ our $db_schema_spec = {
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              ctime DOUBLE NOT NULL, INDEX(ctime), -- create time in our database
 
-             currency VARCHAR(10) NOT NULL, -- the currency we are arbitraging, e.g. LTC
-             size DECIMAL(21,8) NOT NULL, -- amount of "currency" that we are arbitraging (sell on "sell_exchange" and buy on "buy_exchange")
+             base_currency VARCHAR(10) NOT NULL, -- the currency we are arbitraging, e.g. LTC
+             base_size DECIMAL(21,8) NOT NULL, -- amount of "currency" that we are arbitraging (sell on "sell exchange" and buy on "buy exchange")
 
-             -- we sell "amount" of "currency"" on "sell exchange" (the "currency"/"sell_exchange_currency" market pair) at "sell_price" (in "sell_exchange_currency")
-             sell_account_id INT NOT NULL,
-             sell_exchange_id INT NOT NULL,
-             sell_exchange_currency VARCHAR(10) NOT NULL,
-             sell_exchange_ctime DOUBLE, -- create time in "sell exchange"
-             sell_exchange_order_id VARCHAR(32),
-             sell_exchange_price DECIMAL(21,8) NOT NULL, -- price of "currency" in "sell_exchange_currency" when selling
-             sell_price DECIMAL(21,8) NOT NULL, -- price of "currency" in "sell_exchange_currency" (converted USD if fiat) when selling, should be > "buy_price"
-             sell_remaining DECIMAL(21,8) NOT NULL,
-             sell_order_status VARCHAR(16) NOT NULL,
+             expected_profit_pct DOUBLE NOT NULL, -- expected profit percentage (after trading fees)
+             expected_profit DOUBLE NOT NULL, -- expected profit (after trading fees) in quote currency (converted to USD if fiat) if fully executed
 
-             -- then buy the same "amount" of "currency" on "buy_exchange" at "buy_price" (in "buy_exchange_currency")
-             buy_account_id INT NOT NULL,
+             -- we buy "base_size" of "base_currency" on "buy exchange" at
+             -- "buy_gross_price_orig" (in "buy_quote_currency") a.k.a
+             -- "buy_gross_price" (in "buy_quote_currency" converted to USD if
+             -- fiat)
+
+             -- possible statuses/lifecyle: creating (submitting to exchange),
+             -- open (created and open), cancelling, cancelled, done
+
              buy_exchange_id INT NOT NULL,
-             buy_exchange_currency VARCHAR(10) NOT NULL,
-             buy_exchange_ctime DOUBLE, -- order create time in "buy_exchange"
-             buy_exchange_order_id VARCHAR(32),
-             buy_exchange_price DECIMAL(21,8) NOT NULL, -- price of "currency" in "buy_exchange_currency" when buying
-             buy_price DECIMAL(21,8) NOT NULL, -- price of "currency" in "buy_exchange_currency" (converted to USD if fiat) when buying, should be < "sell_price"
-             buy_remaining DECIMAL(21,8) NOT NULL,
+             buy_account_id INT NOT NULL,
+             buy_quote_currency VARCHAR(10) NOT NULL,
+             buy_gross_price_orig DECIMAL(21,8) NOT NULL,
+             buy_gross_price DECIMAL(21,8) NOT NULL,
              buy_status VARCHAR(16) NOT NULL,
 
-             -- possible statuses: dummy, opening (submitting to exchange), open (created and open), cancelling, cancelled, done
+             buy_ctime DOUBLE, -- order create time in "buy_exchange"
+             buy_order_id VARCHAR(80),
+             buy_actual_price DECIMAL(21,8), -- actual price after we create on exchange
+             buy_actual_base_size DECIMAL(21,8), -- actual size after we create on exchange
+             buy_filled_base_size DECIMAL(21,8),
 
-             profit_pct DOUBLE NOT NULL, -- predicted profit percentage (after trading fees)
-             profit_size DOUBLE NOT NULL, -- predicted profit size (after trading fees) in quote currency (converted to USD if fiat) if fully executed
+             -- then sell the same "base_size" of "base_currency"" on "sell
+             -- exchange" (the "base_currency"/"sell_exchange_quote_currency"
+             -- market pair) at "sell_gross_price_orig" (in
+             -- "sell_exchange_quote_currency") a.k.a "sell_gross_price" (in
+             -- "sell_exchange_quote_currency" converted to USD if fiat)
 
-             note VARCHAR(255)
+             sell_exchange_id INT NOT NULL,
+             sell_account_id INT NOT NULL,
+             sell_quote_currency VARCHAR(10) NOT NULL,
+             sell_gross_price_orig DECIMAL(21,8) NOT NULL,
+             sell_gross_price DECIMAL(21,8) NOT NULL,
+             sell_status VARCHAR(16) NOT NULL,
+
+             sell_ctime DOUBLE, -- create time in "sell exchange"
+             sell_order_id VARCHAR(80),
+             sell_actual_price DECIMAL(21,8), -- actual price after we create on exchange
+             sell_actual_base_size DECIMAL(21,8), -- actual size after we create on exchange
+             sell_filled_base_size DECIMAL(21,8)
          )',
+
+        'CREATE TABLE arbit_order_history (
+            id INT NOT NULL PRIMARY KEY
+        )',
     ],
 };
 
@@ -375,8 +410,11 @@ sub _is_fiat {
     $Locale::Codes::Data{'currency'}{'code2id'}{alpha}{uc $code} ? 1:0;
 }
 
+# should be used by all subcommands
 sub _init {
-    my $r = shift;
+    my ($r, $opts) = @_;
+
+    $opts //= {};
 
     my %account_exchanges; # key = exchange safename, value = {account1=>1, account2=>1, ...)
 
@@ -384,32 +422,39 @@ sub _init {
 
   CHECK_ARGUMENTS:
     {
-        # accounts: there must be at least two accounts on two different
-        # exchanges
-        return [400, "Please specify at least two accounts"]
-            unless $r->{args}{accounts} && @{ $r->{args}{accounts} } >= 2;
-        for (@{ $r->{args}{accounts} }) {
-            m!(.+)/(.+)! or return [400, "Invalid account '$_', please use EXCHANGE/ACCOUNT syntax"];
-            my ($xchg, $acc) = ($1, $2);
-            unless (exists $account_exchanges{$xchg}) {
-                my $rec = $xcat->by_safename($xchg);
-                return [400, "Unknown exchange '$xchg'"] unless $rec;
-                return [400, "Exchange '$xchg' is not assigned short code yet. ".
-                            "please contact the maintainer of CryptoExchange::Catalog ".
-                            "to add one for it"] unless $rec->{code};
+      ACCOUNTS:
+        {
+            last unless exists $r->{args}{accounts};
+
+            # accounts: there must be at least two accounts on two different
+            # exchanges
+            return [400, "Please specify at least two accounts"]
+                unless $r->{args}{accounts} && @{ $r->{args}{accounts} } >= 2;
+            for (@{ $r->{args}{accounts} }) {
+                m!(.+)/(.+)! or return [400, "Invalid account '$_', please use EXCHANGE/ACCOUNT syntax"];
+                my ($xchg, $acc) = ($1, $2);
+                unless (exists $account_exchanges{$xchg}) {
+                    my $rec = $xcat->by_safename($xchg);
+                    return [400, "Unknown exchange '$xchg'"] unless $rec;
+                    return [400, "Exchange '$xchg' is not assigned short code yet. ".
+                                "please contact the maintainer of CryptoExchange::Catalog ".
+                                "to add one for it"] unless $rec->{code};
+                }
+                $account_exchanges{$xchg}{$acc} = 1;
             }
-            $account_exchanges{$xchg}{$acc} = 1;
+            return [400, "Please specify accounts on at least two ".
+                        "cryptoexchanges, you only specify account(s) on " .
+                        join(", ", keys %account_exchanges)]
+                unless keys(%account_exchanges) >= 2;
+            $r->{_stash}{account_exchanges} = \%account_exchanges;
         }
-        return [400, "Please specify accounts on at least two ".
-                    "cryptoexchanges, you only specify account(s) on " .
-                    join(", ", keys %account_exchanges)]
-            unless keys(%account_exchanges) >= 2;
-        $r->{_stash}{account_exchanges} = \%account_exchanges;
     }
 
     my $dbh;
   CONNECT:
     {
+        last if $opts->{skip_connect};
+
         require DBIx::Connect::MySQL;
         log_trace "Connecting to database ...";
         $r->{_stash}{dbh} = DBIx::Connect::MySQL->connect(
@@ -423,6 +468,8 @@ sub _init {
 
   SETUP_SCHEMA:
     {
+        last if $opts->{skip_connect};
+
         require SQL::Schema::Versioned;
         my $res = SQL::Schema::Versioned::create_or_update_db_schema(
             dbh => $r->{_stash}{dbh}, spec => $db_schema_spec,
@@ -433,6 +480,8 @@ sub _init {
 
   INSTANTIATE_EXCHANGE_CLIENTS:
     {
+        last if $opts->{skip_instantiate_exchange_clients};
+
         my $time = time();
 
         for my $exchange (sort keys %account_exchanges) {
@@ -593,6 +642,218 @@ sub _init_arbit {
     [200];
 }
 
+sub _format_order_pairs_response {
+    my $order_pairs = shift;
+
+    # format for table display
+    my @res;
+    for my $order_pair (@$order_pairs) {
+        my $size = $order_pair->{base_size};
+        my ($base_currency, $buy_currency)  = $order_pair->{buy}{pair}  =~ m!(.+)/(.+)!;
+        my ($sell_currency) = $order_pair->{sell}{pair} =~ m!/(.+)!;
+        my $profit_currency = _is_fiat($buy_currency) ? 'USD' : $buy_currency;
+
+        my $rec = {
+            size     => $size,
+            currency => $base_currency,
+            buy_from => $order_pair->{buy}{exchange},
+            buy_currency     => $buy_currency,
+            buy_gross_price  => $order_pair->{buy}{gross_price_orig},
+            buy_net_price    => $order_pair->{buy}{net_price_orig},
+            sell_to          => $order_pair->{sell}{exchange},
+            sell_currency    => $sell_currency,
+            sell_gross_price => $order_pair->{sell}{gross_price_orig},
+            sell_net_price   => $order_pair->{sell}{net_price_orig},
+            profit_pct       => $order_pair->{profit_pct},
+            profit_currency  => $profit_currency,
+            profit           => $order_pair->{profit},
+        };
+        if (_is_fiat($buy_currency) && $buy_currency ne 'USD') {
+            $rec->{buy_gross_price_usd} = $order_pair->{buy}{gross_price};
+            $rec->{buy_net_price_usd}   = $order_pair->{buy}{net_price};
+        }
+        if (_is_fiat($sell_currency) && $sell_currency ne 'USD') {
+            $rec->{sell_gross_price_usd} = $order_pair->{sell}{gross_price};
+            $rec->{sell_net_price_usd}   = $order_pair->{sell}{net_price};
+        }
+        push @res, $rec;
+    }
+
+    my $resmeta = {};
+    $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_net_price', 'buy_gross_price_usd', 'buy_net_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_net_price', 'sell_gross_price_usd', 'sell_net_price_usd', 'profit_pct', 'profit_currency', 'profit'];
+    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_gross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
+    $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,          $fnum8,                $fnum8,              undef,     undef,           $fnum8,             $fnum8,           $fnum8,                 $fnum8,               $fnum4,       undef,             $fnum8];
+    $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',         'right',               'right',             'left',    'left',          'right',            'right',          'right',                'right',              'right',      'left',            'right'];
+
+    [200, "OK", \@res, $resmeta];
+}
+
+sub _create_orders {
+    my $r = shift;
+
+    my $dbh = $r->{_stash}{dbh};
+
+    local $dbh->{RaiseError};
+
+  ORDER_PAIR:
+    for my $order_pair (@{ $r->{_stash}{order_pairs} }) {
+        my $is_err;
+        my $do_cancel_buy_order_on_err;
+        my $do_cancel_sell_order_on_err;
+
+        log_debug "Creating order pair on the exchanges: %s ...", $order_pair;
+        my $buy  = $order_pair->{buy};
+        my $sell = $order_pair->{sell};
+        my $buy_eid  = _get_exchange_id($r, $buy ->{exchange});
+        my $buy_aid  = _get_account_id ($r, $buy ->{exchange}, $buy ->{account});
+        my ($buy_quotecur) = $buy->{pair} =~ m!/(.+)!;
+        my $sell_eid = _get_exchange_id($r, $sell->{exchange});
+        my $sell_aid = _get_account_id ($r, $sell->{exchange}, $sell->{account});
+        my ($sell_quotecur) = $sell->{pair} =~ m!/(.+)!;
+
+        my $time = time();
+        # first, insert to database with status 'creating'
+        $dbh->do(
+            "INSERT INTO order_pair (
+               ctime,
+               base_currency, base_size,
+               expected_profit_pct, expected_profit,
+
+               buy_exchange_id , buy_account_id , buy_quote_currency , buy_gross_price_orig , buy_gross_price , buy_status,
+               sell_exchange_id, sell_account_id, sell_quote_currency, sell_gross_price_orig, sell_gross_price, sell_status
+
+             ) VALUES (
+               ?,
+               ?, ?,
+               ?, ?,
+
+               ?, ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, ?, ?
+             )",
+
+            {},
+
+            $time,
+            $order_pair->{base_currency}, $order_pair->{base_size},
+            $order_pair->{profit_pct}, $order_pair->{profit},
+
+            $buy_eid , $buy_aid , $buy_quotecur , $buy ->{gross_price_orig}, $buy ->{gross_price}, 'creating',
+            $sell_eid, $sell_aid, $sell_quotecur, $sell->{gross_price_orig}, $sell->{gross_price}, 'creating',
+        ) or do {
+            log_error "Couldn't record order_pair in db: %s, skipping this order pair", $dbh->errstr;
+            next ORDER_PAIR;
+        };
+        my $pair_id = $dbh->last_insert_id("", "", "", "");
+
+        my $buy_client = $r->{_stash}{exchange_clients}{ $buy->{exchange} }{ $buy->{account} };
+        my $buy_order_id;
+      CREATE_BUY_ORDER:
+        {
+            my $res = $buy_client->create_limit_order(
+                pair => $buy->{pair},
+                type => 'buy',
+                price => $buy->{gross_price_orig},
+                base_size => $order_pair->{base_size},
+            );
+            unless ($res->[0] == 200) {
+                log_error "Couldn't create buy order: %s", $res;
+                $is_err++;
+                goto CLEANUP;
+            }
+            $buy_order_id = $res->[2]{order_id};
+            $do_cancel_buy_order_on_err++;
+            my $res2 = $buy_client->get_order(
+                pair => $buy->{pair},
+                type => 'buy',
+                order_id => $buy_order_id,
+            );
+            unless ($res2->[0] == 200) {
+                log_error "Couldn't get buy order: %s", $res2;
+                $is_err++;
+                goto CLEANUP;
+            }
+            $dbh->do(
+                "UPDATE order_pair SET buy_ctime=?, buy_order_id=?, buy_actual_price=?, buy_actual_base_size=?, buy_status=? WHERE id=?",
+                {},
+                $res2->[2]{create_time}, $buy_order_id, $res->[2]{price}, $res->[2]{base_size}, 'open',
+                $pair_id,
+            ) or do {
+                log_error "Couldn't update order status in db for buy order: %s", $res2;
+            };
+        }
+
+        my $sell_client = $r->{_stash}{exchange_clients}{ $sell->{exchange} }{ $sell->{account} };
+        my $sell_order_id;
+      CREATE_SELL_ORDER:
+        {
+            my $res = $sell_client->create_limit_order(
+                pair => $sell->{pair},
+                type => 'sell',
+                price => $sell->{gross_price_orig},
+                base_size => $order_pair->{base_size},
+            );
+            unless ($res->[0] == 200) {
+                log_error "Couldn't create sell order: %s", $res;
+                $is_err++;
+                goto CLEANUP;
+            }
+            $sell_order_id = $res->[2]{order_id};
+            $do_cancel_sell_order_on_err++;
+            my $res2 = $sell_client->get_order(
+                pair => $sell->{pair},
+                type => 'sell',
+                order_id => $sell_order_id,
+            );
+            unless ($res2->[0] == 200) {
+                log_error "Couldn't get sell order: %s", $res2;
+                $is_err++;
+                goto CLEANUP;
+            }
+            $dbh->do(
+                "UPDATE order_pair SET sell_ctime=?, sell_order_id=?, sell_actual_price=?, sell_actual_base_size=?, sell_status=? WHERE id=?",
+                {},
+                $res2->[2]{create_time}, $sell_order_id, $res->[2]{price}, $res->[2]{base_size}, 'open',
+                $pair_id,
+            ) or do {
+                log_error "Couldn't update order status in db for sell order: %s", $res2;
+            };
+        }
+
+      CLEANUP:
+        {
+            last unless $is_err;
+            if ($do_cancel_buy_order_on_err) {
+                $dbh->do("UPDATE order_pair SET buy_status='cancelling' WHERE id=?", {}, $pair_id);
+                my $res = $buy_client->cancel_order(
+                    type => 'buy',
+                    pair => $buy->{pair},
+                    order_id => $buy_order_id,
+                );
+                if ($res->[0] != 200) {
+                    log_error "Couldn't cancel buy order #%s (order pair ID %d): %s",
+                        $buy_order_id, $pair_id, $res;
+                } else {
+                    $dbh->do("UPDATE order_pair SET buy_status='cancelled' WHERE id=?", {}, $pair_id)
+                }
+            }
+            if ($do_cancel_sell_order_on_err) {
+                $dbh->do("UPDATE order_pair SET sell_status='cancelling' WHERE id=?", {}, $pair_id);
+                my $res = $sell_client->cancel_order(
+                    type => 'sell',
+                    pair => $sell->{pair},
+                    order_id => $sell_order_id,
+                );
+                if ($res->[0] != 200) {
+                    log_error "Couldn't cancel sell order #%s (order pair ID %d): %s",
+                        $sell_order_id, $pair_id, $res;
+                } else {
+                    $dbh->do("UPDATE order_pair SET sell_status='cancelled' WHERE id=?", {}, $pair_id)
+                }
+            }
+        }
+    } # ORDER_PAIR
+}
+
 $SPEC{dump_cryp_config} = {
     v => 1.1,
     args => {
@@ -602,6 +863,7 @@ sub dump_cryp_config {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
+    $res = _init($r, {skip_connect=>1, skip_instantiate_exchange_clients=>1}); return $res unless $res->[0] == 200;
 
     [200, "OK", $r->{_cryp}];
 }
@@ -640,52 +902,12 @@ sub show {
     (my $strategy_modpm = "$strategy_mod.pm") =~ s!::!/!g;
     require $strategy_modpm;
 
-    $res = $strategy_mod->create_order_pairs(r => $r);
+    $res = $strategy_mod->calculate_order_pairs(r => $r);
     return $res unless $res->[0] == 200;
 
     #log_trace "order pairs: %s", $res->[2];
 
-    # format for table display
-    my @res;
-    for my $orderpair (@{ $res->[2] }) {
-        my $size = $orderpair->{base_size};
-        my ($base_currency, $buy_currency)  = $orderpair->{buy}{pair}  =~ m!(.+)/(.+)!;
-        my ($sell_currency) = $orderpair->{sell}{pair} =~ m!/(.+)!;
-        my $profit_currency = _is_fiat($buy_currency) ? 'USD' : $buy_currency;
-
-        my $rec = {
-            size     => $size,
-            currency => $base_currency,
-            buy_from => $orderpair->{buy}{exchange},
-            buy_currency     => $buy_currency,
-            buy_gross_price  => $orderpair->{buy}{gross_price_orig},
-            buy_net_price    => $orderpair->{buy}{net_price_orig},
-            sell_to          => $orderpair->{sell}{exchange},
-            sell_currency    => $sell_currency,
-            sell_gross_price => $orderpair->{sell}{gross_price_orig},
-            sell_net_price   => $orderpair->{sell}{net_price_orig},
-            profit_pct       => $orderpair->{profit_pct},
-            profit_currency  => $profit_currency,
-            profit           => $orderpair->{profit},
-        };
-        if (_is_fiat($buy_currency) && $buy_currency ne 'USD') {
-            $rec->{buy_gross_price_usd} = $orderpair->{buy}{gross_price};
-            $rec->{buy_net_price_usd}   = $orderpair->{buy}{net_price};
-        }
-        if (_is_fiat($sell_currency) && $sell_currency ne 'USD') {
-            $rec->{sell_gross_price_usd} = $orderpair->{sell}{gross_price};
-            $rec->{sell_net_price_usd}   = $orderpair->{sell}{net_price};
-        }
-        push @res, $rec;
-    }
-
-    my $resmeta = {};
-    $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_net_price', 'buy_gross_price_usd', 'buy_net_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_net_price', 'sell_gross_price_usd', 'sell_net_price_usd', 'profit_pct', 'profit_currency', 'profit'];
-    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_gross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
-    $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,          $fnum8,                $fnum8,              undef,     undef,           $fnum8,             $fnum8,           $fnum8,                 $fnum8,               $fnum4,       undef,             $fnum8];
-    $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',         'right',               'right',             'left',    'left',          'right',            'right',          'right',                'right',              'right',      'left',            'right'];
-
-    [200, "OK", \@res, $resmeta];
+    _format_order_pairs_response($res->[2]);
 }
 
 $SPEC{arbit} = {
@@ -714,6 +936,19 @@ _
     args => {
         %args_db,
         %args_arbit_common,
+        rounds => {
+            summary => 'How many rounds',
+            schema => 'int*',
+            default => 1,
+            cmdline_aliases => {
+                loop => {is_flag=>1, code=>sub { $_[0]{rounds} = -1 }, summary => 'Shortcut for --rounds -1'},
+            },
+            description => <<'_',
+
+-1 means unlimited.
+
+_
+        },
         frequency => {
             summary => 'How many seconds to wait between rounds (in seconds)',
             schema => 'posint*',
@@ -724,20 +959,7 @@ A round consists of checking prices and then creating arbitraging order pairs.
 
 _
         },
-        max_order_age => {
-            summary => 'How long should we wait for orders to be completed '.
-                'before cancelling them (in seconds)',
-            schema => 'posint*',
-            default => 2*60,
-            description => <<'_',
-
-Sometimes because of rapid trading and price movement, our order might not be
-filled immediately. This setting sets a limit on how long should an order be
-left open. After this limit is reached, we cancel the order. The imbalance of
-the arbitrage transaction will be recorded.
-
-_
-        },
+        %arg_max_order_age,
     },
     features => {
         dry_run => 1,
@@ -762,9 +984,13 @@ sub arbit {
     (my $strategy_modpm = "$strategy_mod.pm") =~ s!::!/!g;
     require $strategy_modpm;
 
+    my $round = 0;
   ROUND:
     while (1) {
-        $res = $strategy_mod->create_order_pairs(r => $r);
+        $round++;
+        log_info "Round #%d", $round;
+
+        $res = $strategy_mod->calculate_order_pairs(r => $r);
 
         if ($res->[0] == 200) {
             log_debug "Got these orders from arbit strategy module: %s",
@@ -774,22 +1000,23 @@ sub arbit {
                 "skipping this round", $res;
             goto SLEEP;
         }
+        $r->{_stash}{order_pairs} = $res->[2];
 
         if ($args{-dry_run}) {
-            log_info "[DRY-RUN] ";
-            goto SLEEP;
+            if ($args{rounds} == 1) {
+                log_info "[DRY-RUN] Will not actually be creating order pairs on the exchanges, showing order pairs ...";
+                return _format_order_pairs_response($r->{_stash}{order_pairs});
+            } else {
+                log_info "[DRY-RUN] Will not actually be creating order pairs on the exchanges, waiting for next round ...";
+                goto SLEEP;
+            }
         }
 
-        #$res = _submit_orders($r, $res->[2]);
-        #unless ($res->[0] == 200) {
-        #    log_error "Got error response when submitting orders: %s", $res;
-        #}
+        _create_orders($r);
 
-        #$res = _expire_submitted_orders($r);
-        #unless ($res->[0] == 200) {
-        #    log_error "Got error response when expiring submitted orders: %s",
-        #        $res;
-        #}
+        _check_orders($r);
+
+        last if $args{rounds} > 0 && $round >= $args{rounds};
 
       SLEEP:
         log_trace "Sleeping for %d second(s) before next round ...",
@@ -797,7 +1024,47 @@ sub arbit {
         sleep $args{frequency};
     }
 
-    [200]; # should not be reached
+    [200];
+}
+
+$SPEC{check_orders} = {
+    v => 1.1,
+    summary => 'Check the orders that have been created',
+    description => <<'_',
+
+This subcommand will check the orders that have been created previously by
+`arbit` subcommand.
+
+_
+    args => {
+        %args_db,
+        %arg_max_order_age,
+    },
+};
+sub check_orders {
+    my %args = @_;
+
+    my $r = $args{-cmdline_r};
+    $res = _init($r, {skip_instantiate_exchange_clients=>1}); return $res unless $res->[0] == 200;
+
+    my @open_order_pairs;
+    my $sth = $dbh->prepare(
+        "SELECT * FROM order_pair
+         WHERE
+           buy_status  NOT IN ('done','cancelled') OR
+           sell_status NOT IN ('done','cancelled')
+         ORDER BY ctime");
+    $sth->execute;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @open_order_pairs, $row;
+    }
+
+    for my $row (@open_order_pairs) {
+      CHECK_ORDER_BUY: {
+            last if $row->{buy_status} =~ /\A(done|cancelled)\z/;
+        }
+
+    }
 }
 
 1;
@@ -837,6 +1104,7 @@ passing C<$r> around. The keys that are used by routines in this module:
    {exchange_recs}             # key=exchange safename, value=hash (from CryptoExchange::Catalog)
    {exchange_coins}            # key=exchange safename, value=[COIN1, COIN2, ...]
    {exchange_pairs}            # key=exchange safename, value=[{name=>PAIR1, min_base_size=>..., min_quote_size=>...}, ...]
+   {order_pairs}               # result from calculate_order_pairs()
    {quote_currencies}          # what currencies we use to buy/sell the base currencies
    {quote_currencies_for}      # key=base currency, value={quotecurrency1 => 1, quotecurrency2=>1, ...}
    {trading_fees}              # key=exchange safename, value={coin1=>num (in percent) market taker fees, ...}, ':default' for all other coins, ':default' for all other exchanges

@@ -65,7 +65,7 @@ subtest 'opt:min_profit_pct' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -134,7 +134,7 @@ subtest 'opt:max_order_pairs' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -195,7 +195,7 @@ subtest 'buy & sell size match' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -285,7 +285,7 @@ subtest 'buy size > sell size' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -375,7 +375,7 @@ subtest 'buy size < sell size' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -455,7 +455,7 @@ subtest 'selling account balance (1)' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -559,7 +559,7 @@ subtest 'selling account balance (2)' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -650,7 +650,7 @@ subtest 'selling account balance (3: re-sorting)' => sub {
         },
     };
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -763,7 +763,7 @@ subtest 'buying account balance (1)' => sub {
         indodax => { ETH => [{ account => "i1", available => 9998.81673793525 }] },
     };
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -962,7 +962,7 @@ subtest 'opt:max_order_quote_size' => sub {
         }, # [6]
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1053,7 +1053,7 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1169,7 +1169,7 @@ subtest 'opt:min_account_balance' => sub {
         indodax => { ETH => [] },
     };
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1243,7 +1243,7 @@ subtest "minimum buy base size" => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1317,7 +1317,7 @@ subtest "minimum buy quote size" => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1391,7 +1391,7 @@ subtest "minimum sell base size" => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
@@ -1465,7 +1465,7 @@ subtest "minimum sell quote size" => sub {
         },
     ];
 
-    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_create_order_pairs(
+    my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,

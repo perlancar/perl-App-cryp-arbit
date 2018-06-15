@@ -10,7 +10,7 @@ use warnings;
 use Role::Tiny;
 
 requires qw(
-               create_order_pairs
+               calculate_order_pairs
        );
 
 1;
@@ -19,19 +19,19 @@ requires qw(
 =head1 DESCRIPTION
 
 An arbitration strategy module is picked by the main arbit module
-(L<App::cryp::arbit>). It must supply a C<create_order_pairs> class method. This
-class method is given some arguments (see L</"create_order_pairs"> for more
-details), and then must return order pairs. The order pairs will be submitted to
-the exchanges by the main arbit module.
+(L<App::cryp::arbit>). It must supply a C<calculate_order_pairs> class method.
+This class method is given some arguments (see L</"calculate_order_pairs"> for
+more details), and then must return order pairs. The order pairs will be created
+on the exchanges by the main arbit module.
 
 
 =head1 REQUIRED METHODS
 
-=head2 create_order_pairs
+=head2 calculate_order_pairs
 
 Usage:
 
- __PACKAGE__->create_order_pairs(%args) => [$status, $reason, $payload, \%resmeta]
+ __PACKAGE__->calculate_order_pairs(%args) => [$status, $reason, $payload, \%resmeta]
 
 Will be fed these arguments:
 
