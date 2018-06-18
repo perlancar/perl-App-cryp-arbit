@@ -61,6 +61,8 @@ same cryptoexchange.
 _
     },
     base_currencies => {
+        'x.name.is_plural' => 1,
+        'x.name.singular' => 'base_currency',
         summary => 'Target (crypto)currencies to arbitrate',
         schema => ['array*', of=>'cryptocurrency*', min_len=>1],
         description => <<'_',
@@ -72,6 +74,8 @@ arbitrage possibility).
 _
     },
     quote_currencies => {
+        'x.name.is_plural' => 1,
+        'x.name.singular' => 'quote_currency',
         summary => 'The currencies to exchange (buy/sell) the target currencies',
         schema => ['array*', of=>'fiat_or_cryptocurrency*', min_len=>1],
         description => <<'_',
@@ -98,6 +102,12 @@ Below this percentage number, no order pairs will be made to do the arbitrage.
 Note that the price difference that will be considered is the *net* price
 difference (after subtracted by trading fees).
 
+Suggestion: If you set this option too high, there might not be any order pairs
+possible. If you set this option too low, you will be getting thin profits. Run
+`cryp-arbit show` or `cryp-arbit arbit --dry-run` for a while to see what the
+average percentage is and then decide at which point you want to perform
+arbitrage.
+
 _
     },
     max_order_quote_size => {
@@ -114,6 +124,14 @@ order is a selling order at a higher quote currency size than the buying order).
 For example if you are arbitraging BTC against USD and IDR, and set this option
 to 75, then orders will not be above 75 USD. If you are arbitraging LTC against
 BTC and set this to 0.03 then orders will not be above 0.03 BTC.
+
+Suggestion: If you set this option too high, a few orders can use up your
+inventory (and you might not be getting optimal profit percentage). Also, large
+orders can take a while (or too long) to fill. If you set this option too low,
+you will hit the exchanges' minimum order size and no orders can be created.
+Since we want smaller risk of orders not getting filled quickly, we want small
+order sizes. The optimum number range a little above the exchanges' minimum
+order size.
 
 _
     },
@@ -138,7 +156,7 @@ our %arg_max_order_age = (
         summary => 'How long should we wait for orders to be completed '.
             'before cancelling them (in seconds)',
         schema => 'posint*',
-        default => 3600,
+        default => 86400,
         description => <<'_',
 
 Sometimes because of rapid trading and price movement, our order might not be
@@ -196,7 +214,7 @@ our $db_schema_spec = {
              time DOUBLE NOT NULL, INDEX(time),
              base_currency VARCHAR(10) NOT NULL,
              quote_currency VARCHAR(10) NOT NULL,
-             type VARCHAR(4) NOT NULL,
+             type VARCHAR(4) NOT NULL, -- "buy" or "sell"
              price DECIMAL(21,8) NOT NULL, -- price to buy (or sell) base_currency in quote_currency, e.g. if base_currency = BTC, quote_currency = USD, price = 11150 means 1 BTC is $11150
              exchange_id INT NOT NULL,
              note VARCHAR(255)
@@ -253,8 +271,11 @@ our $db_schema_spec = {
              sell_filled_base_size DECIMAL(21,8)
          )',
 
-        'CREATE TABLE arbit_order_history (
-            id INT NOT NULL PRIMARY KEY
+        'CREATE TABLE arbit_order_log (
+            id INT NOT NULL PRIMARY KEY,
+            order_pair_id INT NOT NULL,
+            type VARCHAR(4) NOT NULL, -- "buy" or "sell"
+            summary TEXT NOT NULL
         )',
     ],
 };
@@ -330,18 +351,50 @@ sub _sort_account_balances {
     }
 }
 
+sub _get_exchange_client {
+    my ($r, $exchange, $account) = @_;
+
+    # if account is unspecified (caller doesn't care which account, e.g. he just
+    # wants to get som exchange-related information), then we pick an account
+    # from the configuration
+    unless (defined $account) {
+        my $h = $r->{_cryp}{exchanges}{$exchange};
+        die "No configuration found for exchange $exchange. ".
+            "Please specify [exchange/$exchange] section in configuration"
+            unless keys %$h;
+        $account = (keys %$h)[0];
+    }
+
+    return $r->{_stash}{exchange_clients}{$exchange}{$account} if
+        $r->{_stash}{exchange_clients}{$exchange}{$account};
+
+    my $mod = "App::cryp::Exchange::$exchange";
+    $mod =~ s/-/_/g;
+    (my $modpm = "$mod.pm") =~ s!::!/!g;
+    require $modpm;
+
+    unless ($r->{_cryp}{exchanges}{$exchange}{$account}) {
+        die "No configuration found for exchange $exchange (account $account). ".
+            "Please specify [exchange/$exchange/$account] section in configuration";
+    }
+
+    my $client = $mod->new(
+        %{ $r->{_cryp}{exchanges}{$exchange}{$account} }
+    );
+
+    $r->{_stash}{exchange_clients}{$exchange}{$account} = $client;
+}
+
 sub _get_account_balances {
     my ($r, $no_cache) = @_;
 
     my $dbh = $r->{_stash}{dbh};
-    $r->{_stash}{account_balances} = {};
 
-    for my $e (sort keys %{ $r->{_stash}{exchange_clients} }) {
-        my $clients = $r->{_stash}{exchange_clients}{$e};
-      ACC:
-        for my $acc (sort keys %$clients) {
-            my $aid = _get_account_id($r, $e, $acc);
-            my $client = $clients->{$acc};
+    $r->{_stash}{account_balances} = {};
+    for my $e (sort keys %{ $r->{_stash}{account_exchanges} }) {
+        my $accounts = $r->{_stash}{account_exchanges}{$e};
+        for my $acc (sort keys %$accounts) {
+            my $client = _get_exchange_client($r, $e, $acc);
             my $time = time();
             my $res = $client->list_balances;
             unless ($res->[0] == 200) {
@@ -351,17 +404,17 @@ sub _get_account_balances {
             }
             for my $rec (@{ $res->[2] }) {
                 $rec->{account} = $acc;
-                $rec->{account_id} = $aid;
+                $rec->{account_id} = _get_account_id($r, $e, $acc);
                 push @{ $r->{_stash}{account_balances}{$e}{$rec->{currency}} }, $rec;
                 $dbh->do(
                     "REPLACE INTO latest_balance (time, account_id, currency, available) VALUES (?,?,?,?)",
                     {},
-                    $time, $aid, $rec->{currency}, $rec->{available},
+                    $time, $rec->{account_id}, $rec->{currency}, $rec->{available},
                 );
                 $dbh->do(
                     "INSERT INTO balance_history (time, account_id, currency, available) VALUES (?,?,?,?)",
                     {},
-                    $time, $aid, $rec->{currency}, $rec->{available},
+                    $time, $rec->{account_id}, $rec->{currency}, $rec->{available},
                 );
             } # for rec
         } # for account
@@ -380,8 +433,7 @@ sub _get_exchange_pairs {
     return $r->{_stash}{exchange_pairs}{$exchange} if
         $r->{_stash}{exchange_pairs}{$exchange};
 
-    my $clients = $r->{_stash}{exchange_clients}{$exchange};
-    my $client = $clients->{ (sort keys %$clients)[0] };
+    my $client = _get_exchange_client($r, $exchange);
 
     my $res = $client->list_pairs(detail=>1);
     if ($res->[0] == 200) {
@@ -422,9 +474,9 @@ sub _init {
 
   CHECK_ARGUMENTS:
     {
-      ACCOUNTS:
+      CHECK_ACCOUNTS:
         {
-            last unless exists $r->{args}{accounts};
+            last CHECK_ACCOUNTS unless exists $r->{args}{accounts};
 
             # accounts: there must be at least two accounts on two different
             # exchanges
@@ -478,37 +530,6 @@ sub _init {
             unless $res->[0] == 200;
     }
 
-  INSTANTIATE_EXCHANGE_CLIENTS:
-    {
-        last if $opts->{skip_instantiate_exchange_clients};
-
-        my $time = time();
-
-        for my $exchange (sort keys %account_exchanges) {
-
-            my $mod = "App::cryp::Exchange::$exchange";
-            $mod =~ s/-/_/g;
-            (my $modpm = "$mod.pm") =~ s!::!/!g;
-            require $modpm;
-
-            my $accounts = $account_exchanges{$exchange};
-            for my $account (sort keys %$accounts) {
-                # assign an ID to the exchange, if not already so
-                my $eid = _get_exchange_id($r, $exchange);
-                $r->{_stash}{exchange_ids}{$exchange} = $eid;
-
-                unless ($r->{_cryp}{exchanges}{$exchange}{$account}) {
-                    return [400, "No configuration found for exchange $exchange (account $account). ".
-                                "Please specify [exchange/$exchange/$account] section in configuration"];
-                }
-                my $client = $mod->new(
-                    %{ $r->{_cryp}{exchanges}{$exchange}{$account} }
-                );
-                $r->{_stash}{exchange_clients}{$exchange}{$account} = $client;
-            } # account
-        } # exchange
-    } # INSTANTIATE_EXCHANGE_CLIENTS
-
     [200];
 }
 
@@ -523,11 +544,7 @@ sub _init_arbit {
         my %quotecur_exchanges; # key=(cryptocurrency code or ':fiat'), value={exchange1=>1, ...}
 
         # list pairs on all exchanges
-        for my $e (sort keys %{ $r->{_stash}{exchange_clients} }) {
-            my $clients = $r->{_stash}{exchange_clients}{$e};
-            # pick first account
-            my $acc = (sort keys %$clients)[0];
-            my $client = $clients->{$acc};
+        for my $e (sort keys %{ $r->{_stash}{account_exchanges} }) {
             my $pair_recs = _get_exchange_pairs($r, $e);
             for my $pair_rec (@$pair_recs) {
                 my $pair = $pair_rec->{name};
@@ -587,11 +604,7 @@ sub _init_arbit {
         my %basecur_exchanges; # key=currency code, value={exchange1=>1, ...}
 
         # list pairs on all exchanges
-        for my $e (sort keys %{ $r->{_stash}{exchange_clients} }) {
-            my $clients = $r->{_stash}{exchange_clients}{$e};
-            # pick first account
-            my $acc = (sort keys %$clients)[0];
-            my $client = $clients->{$acc};
+        for my $e (sort keys %{ $r->{_stash}{account_exchanges} }) {
             my $pair_recs = _get_exchange_pairs($r, $e);
             for my $pair_rec (@$pair_recs) {
                 my $pair = $pair_rec->{name};
@@ -745,7 +758,7 @@ sub _create_orders {
         };
         my $pair_id = $dbh->last_insert_id("", "", "", "");
 
-        my $buy_client = $r->{_stash}{exchange_clients}{ $buy->{exchange} }{ $buy->{account} };
+        my $buy_client = _get_exchange_client($r, $buy->{exchange}, $buy->{account});
         my $buy_order_id;
       CREATE_BUY_ORDER:
         {
@@ -782,7 +795,7 @@ sub _create_orders {
             };
         }
 
-        my $sell_client = $r->{_stash}{exchange_clients}{ $sell->{exchange} }{ $sell->{account} };
+        my $sell_client = _get_exchange_client($r, $sell->{exchange}, $sell->{account});
         my $sell_order_id;
       CREATE_SELL_ORDER:
         {
@@ -863,7 +876,9 @@ sub dump_cryp_config {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
-    $res = _init($r, {skip_connect=>1, skip_instantiate_exchange_clients=>1}); return $res unless $res->[0] == 200;
+    my $res;
+
+    $res = _init($r, {skip_connect=>1}); return $res unless $res->[0] == 200;
 
     [200, "OK", $r->{_cryp}];
 }
@@ -993,7 +1008,7 @@ sub arbit {
         $res = $strategy_mod->calculate_order_pairs(r => $r);
 
         if ($res->[0] == 200) {
-            log_debug "Got these orders from arbit strategy module: %s",
+            log_debug "Got these order pairs from arbit strategy module: %s",
                 $res->[2];
         } else {
             log_error "Got error response from arbit strategy module: %s, ".
@@ -1027,13 +1042,170 @@ sub arbit {
     [200];
 }
 
+sub _check_orders {
+    my $r = shift;
+
+    my $dbh = $r->{_stash}{dbh};
+
+    my $code_update_buy_status = sub {
+        my ($id, $status, $summary) = @_;
+        local $dbh->{RaiseError};
+        $dbh->do(
+            "UPDATE order_pair SET buy_status=? WHERE id=?",
+            {},
+            $status,
+            $id,
+        ) or do {
+            log_warn "Couldn't update buy status for order pair #%d: %s",
+                $id, $dbh->errstr;
+            return;
+        };
+        $dbh->do(
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            {},
+            $id, 'buy', "status changed to $status" . ($summary ? ": $summary" : ""),
+        );
+    };
+
+    my $code_update_sell_status = sub {
+        my ($id, $status, $summary) = @_;
+        local $dbh->{RaiseError};
+        $dbh->do(
+            "UPDATE order_pair SET sell_status=? WHERE id=?",
+            {},
+            $status,
+            $id,
+        ) or do {
+            log_warn "Couldn't update sell status for order pair #%d: %s",
+                $id, $dbh->errstr;
+            return;
+        };
+        $dbh->do(
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            {},
+            $id, 'sell', "status changed to $status" . ($summary ? ": $summary" : ""),
+        );
+    };
+
+    my $code_update_buy_filled_base_size = sub {
+        my ($id, $size, $summary) = @_;
+        local $dbh->{RaiseError};
+        $dbh->do(
+            "UPDATE order_pair SET buy_filled_base_size=? WHERE id=?",
+            {},
+            $size,
+            $id,
+        ) or do {
+            log_warn "Couldn't update buy filled base size for order pair #%d: %s",
+                $id, $dbh->errstr;
+            return;
+        };
+        $dbh->do(
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            {},
+            $id, 'buy', "filled_base_size changed to $size" . ($summary ? ": $summary" : ""),
+        );
+    };
+
+    my $code_update_sell_filled_base_size = sub {
+        my ($id, $size, $summary) = @_;
+        local $dbh->{RaiseError};
+        $dbh->do(
+            "UPDATE order_pair SET sell_filled_base_size=? WHERE id=?",
+            {},
+            $size,
+            $id,
+        ) or do {
+            log_warn "Couldn't update sell filled base size for order pair #%d: %s",
+                $id, $dbh->errstr;
+            return;
+        };
+        $dbh->do(
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            {},
+            $id, 'sell', "filled_base_size changed to $size" . ($summary ? ": $summary" : ""),
+        );
+    };
+
+    my @open_order_pairs;
+    my $sth = $dbh->prepare(
+        "SELECT
+           op.id id,
+           op.ctime ctime,
+           CONCAT(op.base_currency, '/', op.buy_quote_currency) buy_pair,
+           op.buy_status buy_status,
+           (SELECT safename FROM exchange WHERE id=op.buy_exchange_id) buy_exchange,
+           (SELECT nickname FROM account WHERE id=op.buy_account_id) buy_account,
+           op.buy_order_id buy_order_id,
+
+           op.sell_status sell_status,
+           CONCAT(op.base_currency, '/', op.sell_quote_currency) sell_pair,
+           (SELECT safename FROM exchange WHERE id=op.sell_exchange_id) sell_exchange,
+           (SELECT nickname FROM account WHERE id=op.sell_account_id) sell_account,
+           op.sell_order_id sell_order_id
+         FROM order_pair op
+         WHERE
+           op.buy_status  NOT IN ('done','cancelled') OR
+           op.sell_status NOT IN ('done','cancelled')
+         ORDER BY op.ctime");
+    $sth->execute;
+    while (my $row = $sth->fetchrow_hashref) {
+        push @open_order_pairs, $row;
+    }
+
+    my $time = time();
+    for my $op (@open_order_pairs) {
+        log_debug "Checking order pair #%d (buy status=%s, sell status=%s) ...",
+            $op->{id}, $op->{buy_status}, $op->{sell_status};
+
+      CHECK_BUY_ORDER: {
+            last if $op->{buy_status} =~ /\A(done|cancelled)\z/;
+            my $client = _get_exchange_client($r, $op->{buy_exchange}, $op->{buy_account});
+            my $res = $client->get_order(pair=>$op->{buy_pair}, type=>'buy', order_id=>$op->{buy_order_id});
+            if ($res->[0] == 404) {
+                # assume 404 as order which was never filled and got cancelled.
+                # some exchanges, e.g. gdax return 404 for such orders
+                $code_update_buy_status->($op->{id}, 'cancelled', 'not found via get_order(), assume cancelled without being filled');
+                last;
+            } elsif ($res->[0] != 200) {
+                log_error "Couldn't get buy order %s (pair %s): %s",
+                    $op->{buy_order_id}, $op->{buy_pair}, $res;
+                last;
+            } else {
+                $code_update_buy_status->($op->{id}, $res->[2]{status});
+                $code_update_buy_filled_base_size->($op->{id}, $res->[2]{filled_base_size});
+            }
+        } # CHECK_BUY_ORDER
+
+      CHECK_SELL_ORDER: {
+            last if $op->{sell_status} =~ /\A(done|cancelled)\z/;
+            my $client = _get_exchange_client($r, $op->{sell_exchange}, $op->{sell_account});
+            my $res = $client->get_order(pair=>$op->{sell_pair}, type=>'sell', order_id=>$op->{sell_order_id});
+            if ($res->[0] == 404) {
+                # assume 404 as order which was never filled and got cancelled.
+                # some exchanges, e.g. gdax return 404 for such orders
+                $code_update_sell_status->($op->{id}, 'cancelled', 'not found via get_order(), assume cancelled without being filled');
+                last;
+            } elsif ($res->[0] != 200) {
+                log_error "Couldn't get sell order %s (pair %s): %s",
+                    $op->{sell_order_id}, $op->{sell_pair}, $res;
+                last;
+            } else {
+                $code_update_sell_status->($op->{id}, $res->[2]{status});
+                $code_update_sell_filled_base_size->($op->{id}, $res->[2]{filled_base_size});
+            }
+        } # CHECK_SELL_ORDER
+    }
+}
+
 $SPEC{check_orders} = {
     v => 1.1,
     summary => 'Check the orders that have been created',
     description => <<'_',
 
 This subcommand will check the orders that have been created previously by
-`arbit` subcommand.
+`arbit` subcommand. It will update the order status and filled size (if still
+open). It will cancel (give up) the orders if deemed too old.
 
 _
     args => {
@@ -1045,26 +1217,16 @@ sub check_orders {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
-    $res = _init($r, {skip_instantiate_exchange_clients=>1}); return $res unless $res->[0] == 200;
 
-    my @open_order_pairs;
-    my $sth = $dbh->prepare(
-        "SELECT * FROM order_pair
-         WHERE
-           buy_status  NOT IN ('done','cancelled') OR
-           sell_status NOT IN ('done','cancelled')
-         ORDER BY ctime");
-    $sth->execute;
-    while (my $row = $sth->fetchrow_hashref) {
-        push @open_order_pairs, $row;
-    }
+    my $res;
 
-    for my $row (@open_order_pairs) {
-      CHECK_ORDER_BUY: {
-            last if $row->{buy_status} =~ /\A(done|cancelled)\z/;
-        }
+    # [ux] remove extraneous arguments supplied by config
+    delete $r->{args}{accounts};
 
-    }
+    $res = _init($r); return $res unless $res->[0] == 200;
+
+    _check_orders($r);
+    [200];
 }
 
 1;
@@ -1076,6 +1238,16 @@ Please see included script L<cryp-arbit>.
 
 
 =head1 DESCRIPTION
+
+=head2 Glossary
+
+=over
+
+=item * inventory
+
+=item * order pair
+
+=back
 
 
 =head1 INTERNAL NOTES
