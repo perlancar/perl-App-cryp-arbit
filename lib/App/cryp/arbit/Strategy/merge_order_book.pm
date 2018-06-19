@@ -30,6 +30,7 @@ sub _calculate_order_pairs_for_base_currency {
     my $account_balances      = $args{account_balances};
     my $min_account_balances  = $args{min_account_balances};
     my $exchange_pairs        = $args{exchange_pairs};
+    my $forex_spreads         = $args{forex_spreads};
 
     my @order_pairs;
 
@@ -257,6 +258,47 @@ sub _calculate_order_pairs_for_base_currency {
 
     } # CREATE
 
+  ADJUST_FOREX_SPREAD:
+    {
+        my @tmp = @order_pairs;
+        @order_pairs = ();
+        my $i = 0;
+      ORDER_PAIR:
+        for my $op (@tmp) {
+            $i++;
+            my ($bcur) = $op->{buy}{pair}  =~ m!/(.+)!;
+            my ($scur) = $op->{sell}{pair} =~ m!/(.+)!;
+            next if $bcur eq $scur;
+
+            my $spread;
+            $spread = $forex_spreads->{"$bcur/$scur"} if $forex_spreads;
+
+            unless (defined $spread) {
+                log_warn "Order pair #%d (buy %s - sell %s): didn't find ".
+                    "forex spread for %s/%s, not adjusting for forex spread",
+                    $i, $op->{buy}{pair}, $op->{sell}{pair}, $bcur, $scur;
+                next ORDER_PAIR;
+            }
+            log_trace "Order pair #%d (buy %s - sell %s, %.4f%%): adjusting ".
+                "with %s/%s forex spread %.4f%%",
+                $i, $op->{buy}{pair}, $op->{sell}{pair}, $op->{profit_pct}, $bcur, $scur, $spread;
+            my $orig_profit_pct = $op->{profit_pct};
+            $op->{profit_pct} -= $spread;
+            $op->{profit} *= $op->{profit_pct} / $orig_profit_pct;
+            $op->{fx_spread} = $spread;
+            $op->{profit_pct0} = $orig_profit_pct;
+            if ($op->{profit_pct} < $min_profit_pct) {
+                log_trace "Order pair #%d: After forex spread adjustment, profit percentage is too small (%.4f, wants >= %.4f), skipping this order pair",
+                    $i, $op->{profit_pct}, $min_profit_pct;
+                next ORDER_PAIR;
+            }
+            push @order_pairs, $op;
+        }
+    } # ADJUST_FOREX_SPREAD
+
+    # re-sort
+    @order_pairs = sort { $b->{profit_pct} <=> $a->{profit_pct} } @order_pairs;
+
     \@order_pairs;
 }
 
@@ -273,6 +315,88 @@ sub calculate_order_pairs {
         last if $r->{args}{ignore_balance};
         App::cryp::arbit::_get_account_balances($r, 'no-cache');
     } # GET_ACCOUNT_BALANCES
+
+  GET_FOREX_RATES:
+    {
+        # get foreign fiat currency vs USD exchange rate. we'll use the average
+        # rate for this first. but we'll adjust the price difference percentage
+        # with the buy-sell spread later.
+
+        my %seen;
+
+        $r->{_stash}{forex_rates} = {};
+
+        for my $cur (@{ $r->{_stash}{quote_currencies} }) {
+            next unless App::cryp::arbit::_is_fiat($cur);
+            next if $cur eq 'USD';
+            next if $seen{$cur}++;
+
+            require Finance::Currency::FiatX;
+
+            my $fxres_low  = Finance::Currency::FiatX::get_spot_rate(
+                dbh => $dbh, from => $cur, to => 'USD', type => 'buy', source => ':lowest');
+            if ($fxres_low->[0] != 200) {
+                return [412, "Couldn't get conversion rate (lowest buy) from ".
+                            "$cur to USD: $fxres_low->[0] - $fxres_low->[1]"];
+            }
+
+            my $fxres_high = Finance::Currency::FiatX::get_spot_rate(
+                dbh => $dbh, from => $cur, to => 'USD', type => 'sell', source => ':highest');
+            if ($fxres_high->[0] != 200) {
+                return [412, "Couldn't get conversion rate (highest sell) ".
+                            "from $cur to USD: $fxres_high->[0] - ".
+                            "$fxres_high->[1]"];
+            }
+
+            my $fxrate_avg = ($fxres_low->[2]{rate} + $fxres_high->[2]{rate})/2;
+            $r->{_stash}{forex_rates}{"$cur/USD"} = $fxrate_avg;
+        }
+    } # GET_FOREX_RATES
+
+  GET_FOREX_SPREADS:
+    {
+        # when we arbitrage using two different fiat currencies, e.g. BTC/USD
+        # and BTC/IDR, we want to take into account the USD/IDR buy-sell spread
+        # (the "forex spread") and subtract this from the price difference
+        # percentage to be safer.
+
+        $r->{_stash}{forex_spreads} = {};
+
+        my @curs;
+        for my $cur (@{ $r->{_stash}{quote_currencies} }) {
+            next unless App::cryp::arbit::_is_fiat($cur);
+            push @curs, $cur unless grep { $cur eq $_ } @curs;
+        }
+        last unless @curs;
+
+        require Finance::Currency::FiatX;
+
+        for my $cur1 (@curs) {
+            for my $cur2 (@curs) {
+                next if $cur1 eq $cur2;
+
+                my $fxres_low = Finance::Currency::FiatX::get_spot_rate(
+                    dbh => $dbh, from => $cur1, to => $cur2, type => 'buy', source => ':lowest');
+                if ($fxres_low->[0] != 200) {
+                    return [412, "Couldn't get conversion rate (lowest buy) for ".
+                                "$cur1/$cur2: $fxres_low->[0] - $fxres_low->[1]"];
+                }
+
+                my $fxres_high = Finance::Currency::FiatX::get_spot_rate(
+                    dbh => $dbh, from => $cur1, to => $cur2, type => 'sell', source => ':highest');
+                if ($fxres_high->[0] != 200) {
+                    return [412, "Couldn't get conversion rate (highest sell) ".
+                                "for $cur1/$cur2: $fxres_high->[0] - ".
+                                "$fxres_high->[1]"];
+                }
+
+                my $r1 = $fxres_low->[2]{rate};
+                my $r2 = $fxres_high->[2]{rate};
+                my $spread = $r1 > $r2 ? ($r1-$r2)/$r2*100 : ($r2-$r1)/$r1*100;
+                $r->{_stash}{forex_spreads}{"$cur1/$cur2"} = abs $spread;
+            }
+        }
+    } # GET_FOREX_SPREADS
 
     my %exchanges_for; # key="base currency"/"quote cryptocurrency or ':fiat'", value => [exchange, ...]
     my %fiat_for;      # key=exchange safename, val=[fiat currency, ...]
@@ -422,48 +546,22 @@ sub calculate_order_pairs {
                              $time, $base_currency, $quotecur, $sell_orders{$exchange}[0]{gross_price_orig}, $eid, "sell");
                 } else {
                     # convert fiat to USD
-                    my $fxres_low  = Finance::Currency::FiatX::get_spot_rate(
-                        from => $quotecur, to => 'USD', dbh => $dbh, type => 'buy', source => ':lowest');
-                    if ($fxres_low->[0] != 200) {
-                        log_error "Couldn't get conversion rate (lowest buy) from %s to USD: %s, skipping this pair",
-                            $quotecur, $fxres_low;
-                        next PAIR;
-                    }
-
-                    my $fxres_high = Finance::Currency::FiatX::get_spot_rate(
-                        from => $quotecur, to => 'USD', dbh => $dbh, type => 'sell', source => ':highest');
-                    if ($fxres_high->[0] != 200) {
-                        log_error "Couldn't get conversion rate (highest sell) from %s to USD: %s, skipping this pair",
-                            $quotecur, $fxres_high;
-                        next PAIR;
-                    }
-
-                    my $fxrate_spread = do {
-                        my $r1 = $fxres_low->[2]{rate};
-                        my $r2 = $fxres_high->[2]{rate};
-                        $r1 > $r2 ? ($r1-$r2)/$r2*100 : ($r2-$r1)/$r1*100;
-                    };
-                    $fxrate_spreads{"$quotecur/USD"} = $fxrate_spread;
-                    my $fxrate_avg = ($fxres_low->[2]{rate} + $fxres_high->[2]{rate})/2;
+                    my $fxrate = $r->{_stash}{forex_rates}{"$quotecur/USD"}
+                        or die "BUG: Didn't get forex rate for $quotecur/USD?";
 
                     for (@{ $buy_orders{$exchange} }) {
-                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_avg;
-                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_avg;;
+                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate;
+                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate;;
                     }
 
                     my $fxrate_note = join(
                         " ",
-                        sprintf("$quotecur/USD fxrate: %.8f", $fxrate_avg),
-                        sprintf("avg between low rate: %.8f (source: %s note: %s)", $fxres_low->[2]{rate}, $fxres_low->[2]{source} // '-', $fxres_low->[2]{note}),
-                        sprintf("and high rate: %.8f (source: %s note: %s)", $fxres_high->[2]{rate}, $fxres_high->[2]{source} // '-', $fxres_high->[2]{note}),
+                        sprintf("$quotecur/USD forex rate: %.8f", $fxrate),
                     );
 
-                    # similarly, since we'll be selling cryptocurrency to these
-                    # buy orders, we use the low rate so the coins we sell is on
-                    # the "cheaper side".
                     for (@{ $sell_orders{$exchange} }) {
-                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_avg;
-                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_avg;
+                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate;
+                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate;
                     }
 
                     $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
@@ -476,7 +574,6 @@ sub calculate_order_pairs {
                     $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type, note) VALUES (?,?,?,?,?,?, ?)", {},
                              $time, $base_currency, "USD", $sell_orders{$exchange}[0]{gross_price}, $eid, "sell",
                              $fxrate_note);
-
                 } # convert fiat currency to USD
             } # for pair
         } # for exchange
@@ -527,6 +624,7 @@ sub calculate_order_pairs {
             (account_balances    => $account_balances) x !$r->{args}{ignore_balance},
             min_account_balances => $r->{args}{min_account_balances},
             (exchange_pairs       => $r->{_stash}{exchange_pairs}) x !$r->{args}{ignore_min_order_size},
+            forex_spreads        => $r->{_stash}{forex_spreads},
         );
         for (@$coin_order_pairs) {
             $_->{base_currency} = $base_currency;

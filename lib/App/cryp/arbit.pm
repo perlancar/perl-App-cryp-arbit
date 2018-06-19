@@ -100,7 +100,7 @@ _
 
 Below this percentage number, no order pairs will be made to do the arbitrage.
 Note that the price difference that will be considered is the *net* price
-difference (after subtracted by trading fees).
+difference (after subtracted by trading fees and forex spread).
 
 Suggestion: If you set this option too high, there might not be any order pairs
 possible. If you set this option too low, you will be getting thin profits. Run
@@ -1276,6 +1276,8 @@ passing C<$r> around. The keys that are used by routines in this module:
    {exchange_recs}             # key=exchange safename, value=hash (from CryptoExchange::Catalog)
    {exchange_coins}            # key=exchange safename, value=[COIN1, COIN2, ...]
    {exchange_pairs}            # key=exchange safename, value=[{name=>PAIR1, min_base_size=>..., min_quote_size=>...}, ...]
+   {forex_rates}               # key=currency pair (e.g. IDR/USD), val=exchange rate (avg rate)
+   {forex_spreads}             # key=fiat currency pair, e.g. USD/IDR, value=percentage
    {order_pairs}               # result from calculate_order_pairs()
    {quote_currencies}          # what currencies we use to buy/sell the base currencies
    {quote_currencies_for}      # key=base currency, value={quotecurrency1 => 1, quotecurrency2=>1, ...}
