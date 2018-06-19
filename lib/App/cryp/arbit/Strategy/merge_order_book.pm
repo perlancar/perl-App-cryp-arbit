@@ -422,55 +422,60 @@ sub calculate_order_pairs {
                              $time, $base_currency, $quotecur, $sell_orders{$exchange}[0]{gross_price_orig}, $eid, "sell");
                 } else {
                     # convert fiat to USD
-                    my ($fxrate_buy, $fxrate_sell);
-
-                    my $cbuyres  = Finance::Currency::FiatX::convert_fiat_currency(
-                        amount => 1, from => $quotecur, to => 'USD', dbh => $dbh, type => 'buy');
-                    if ($cbuyres->[0] != 200) {
-                        log_error "Couldn't get conversion rate (buy) from %s to USD, skipping this pair",
-                            $quotecur;
+                    my $fxres_low  = Finance::Currency::FiatX::get_spot_rate(
+                        from => $quotecur, to => 'USD', dbh => $dbh, type => 'buy', source => ':lowest');
+                    if ($fxres_low->[0] != 200) {
+                        log_error "Couldn't get conversion rate (lowest buy) from %s to USD: %s, skipping this pair",
+                            $quotecur, $fxres_low;
                         next PAIR;
                     }
-                    $fxrate_buy = $cbuyres->[2];
 
-                    my $csellres = Finance::Currency::FiatX::convert_fiat_currency(
-                        amount => 1, from => $quotecur, to => 'USD', dbh => $dbh, type => 'sell');
-                    if ($csellres->[0] != 200) {
-                        log_error "Couldn't get conversion rate (sell) from %s to USD, skipping this pair",
-                            $quotecur;
+                    my $fxres_high = Finance::Currency::FiatX::get_spot_rate(
+                        from => $quotecur, to => 'USD', dbh => $dbh, type => 'sell', source => ':highest');
+                    if ($fxres_high->[0] != 200) {
+                        log_error "Couldn't get conversion rate (highest sell) from %s to USD: %s, skipping this pair",
+                            $quotecur, $fxres_high;
                         next PAIR;
                     }
-                    $fxrate_sell = $csellres->[2];
 
-                    #log_trace "Will be using these conversion rates from %s to USD: buy=%.4f, sell=%.4f",
-                    #    $quotecur, $fxrate_buy, $fxrate_sell;
+                    my $fxrate_spread = do {
+                        my $r1 = $fxres_low->[2]{rate};
+                        my $r2 = $fxres_high->[2]{rate};
+                        $r1 > $r2 ? ($r1-$r2)/$r2*100 : ($r2-$r1)/$r1*100;
+                    };
+                    $fxrate_spreads{"$quotecur/USD"} = $fxrate_spread;
+                    my $fxrate_avg = ($fxres_low->[2]{rate} + $fxres_high->[2]{rate})/2;
 
-                    # since we will be selling the coins to these buyers, we
-                    # will be getting (non-USD, e.g. IDR) fiat currencies. to
-                    # exchange these IDR for USD, we need to use the sell
-                    # fxrate.
                     for (@{ $buy_orders{$exchange} }) {
-                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_sell;
-                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_sell;
+                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_avg;
+                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_avg;;
                     }
 
-                    # similary, since we will be buying coins from these
-                    # sellers, we will be needing (non-USD, e.g. IDR) fiat
-                    # currencies. we will need to sell our USD first to get IDR.
-                    # thus, we're using the buy fxrate.
+                    my $fxrate_note = join(
+                        " ",
+                        sprintf("$quotecur/USD fxrate: %.8f", $fxrate_avg),
+                        sprintf("avg between low rate: %.8f (source: %s note: %s)", $fxres_low->[2]{rate}, $fxres_low->[2]{source} // '-', $fxres_low->[2]{note}),
+                        sprintf("and high rate: %.8f (source: %s note: %s)", $fxres_high->[2]{rate}, $fxres_high->[2]{source} // '-', $fxres_high->[2]{note}),
+                    );
+
+                    # similarly, since we'll be selling cryptocurrency to these
+                    # buy orders, we use the low rate so the coins we sell is on
+                    # the "cheaper side".
                     for (@{ $sell_orders{$exchange} }) {
-                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_buy;
-                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_buy;
+                        $_->{gross_price} = $_->{gross_price_orig} * $fxrate_avg;
+                        $_->{net_price}   = $_->{net_price_orig}   * $fxrate_avg;
                     }
 
                     $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
                              $time, $base_currency, $quotecur, $buy_orders{$exchange}[0]{gross_price_orig}, $eid, "buy");
                     $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
                          $time, $base_currency, $quotecur, $sell_orders{$exchange}[0]{gross_price_orig}, $eid, "sell");
-                    $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
-                             $time, $base_currency, "USD", $buy_orders{$exchange}[0]{gross_price}, $eid, "buy");
-                    $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type) VALUES (?,?,?,?,?,?)", {},
-                         $time, $base_currency, "USD", $sell_orders{$exchange}[0]{gross_price}, $eid, "sell");
+                    $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type, note) VALUES (?,?,?,?,?,?, ?)", {},
+                             $time, $base_currency, "USD", $buy_orders{$exchange}[0]{gross_price}, $eid, "buy",
+                             $fxrate_note);
+                    $dbh->do("INSERT INTO price (time,base_currency,quote_currency,price,exchange_id,type, note) VALUES (?,?,?,?,?,?, ?)", {},
+                             $time, $base_currency, "USD", $sell_orders{$exchange}[0]{gross_price}, $eid, "sell",
+                             $fxrate_note);
 
                 } # convert fiat currency to USD
             } # for pair
@@ -521,7 +526,7 @@ sub calculate_order_pairs {
             max_order_pairs      => $r->{args}{max_order_pairs_per_round},
             (account_balances    => $account_balances) x !$r->{args}{ignore_balance},
             min_account_balances => $r->{args}{min_account_balances},
-            (exchange_pairs       => $r->{_stash}{exchange_pairs}) x !$r->{args}{ignore_min_order_size}
+            (exchange_pairs       => $r->{_stash}{exchange_pairs}) x !$r->{args}{ignore_min_order_size},
         );
         for (@$coin_order_pairs) {
             $_->{base_currency} = $base_currency;
