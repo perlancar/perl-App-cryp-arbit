@@ -7,7 +7,7 @@ use Test::More 0.98;
 
 use App::cryp::arbit::Strategy::merge_order_book;
 
-subtest 'opt:min_profit_pct' => sub {
+subtest 'opt:min_net_profit_margin' => sub {
     my $all_buy_orders = [
         {
             base_size        => 1,
@@ -53,7 +53,8 @@ subtest 'opt:min_profit_pct' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -69,12 +70,15 @@ subtest 'opt:min_profit_pct' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 1.6,
+        min_net_profit_margin    => 1.6,
     );
 
+    use DD; dd $order_pairs;
     is_deeply($order_pairs, $correct_order_pairs)
         or diag explain $order_pairs;
 };
+
+goto DONE_TESTING;
 
 subtest 'opt:max_order_pairs' => sub {
     my $all_buy_orders = [
@@ -122,7 +126,8 @@ subtest 'opt:max_order_pairs' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -138,7 +143,7 @@ subtest 'opt:max_order_pairs' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         max_order_pairs   => 1,
     );
 
@@ -183,7 +188,8 @@ subtest 'buy & sell size match' => sub {
                 pair => "ETH/USD",
             },
             profit => 0.8,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -199,7 +205,7 @@ subtest 'buy & sell size match' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -252,7 +258,8 @@ subtest 'buy size > sell size' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -273,7 +280,7 @@ subtest 'buy size > sell size' => sub {
                 pair => "ETH/USD",
             },
             profit => 4.71999999999998,
-            profit_pct => 1.19433198380566,
+            net_profit_margin => 1.19433198380566,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -289,7 +296,7 @@ subtest 'buy size > sell size' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -342,7 +349,8 @@ subtest 'buy size < sell size' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -363,7 +371,7 @@ subtest 'buy size < sell size' => sub {
                 pair => "ETH/USD",
             },
             profit => 6.32000000000003,
-            profit_pct => 1.60601748322831,
+            net_profit_margin => 1.60601748322831,
             sell => {
                 exchange => "indodax",
                 gross_price => 500,
@@ -379,7 +387,7 @@ subtest 'buy size < sell size' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -442,7 +450,8 @@ subtest 'selling account balance (1)' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.2,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -460,7 +469,7 @@ subtest 'selling account balance (1)' => sub {
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
         account_balances  => $account_balances,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -523,7 +532,8 @@ subtest 'selling account balance (2)' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.2,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -546,7 +556,7 @@ subtest 'selling account balance (2)' => sub {
                 pair => "ETH/USD",
             },
             profit => 0.24,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
             sell => {
                 account => "i2",
                 exchange => "indodax",
@@ -564,7 +574,7 @@ subtest 'selling account balance (2)' => sub {
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
         account_balances  => $account_balances,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -627,7 +637,8 @@ subtest 'selling account balance (3: re-sorting)' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -655,7 +666,7 @@ subtest 'selling account balance (3: re-sorting)' => sub {
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
         account_balances  => $account_balances,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         max_order_pairs   => 1,
     );
 
@@ -722,7 +733,8 @@ subtest 'buying account balance (1)' => sub {
                 pair => "ETH/USD",
             },
             profit => 0.814498065567094,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -745,7 +757,7 @@ subtest 'buying account balance (1)' => sub {
                 pair => "ETH/USD",
             },
             profit => 0.651598452453675,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -768,7 +780,7 @@ subtest 'buying account balance (1)' => sub {
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
         account_balances  => $account_balances,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -814,159 +826,166 @@ subtest 'opt:max_order_quote_size' => sub {
 
     my $correct_order_pairs = [
         {
-            base_size => 0.17996400719856,  # .{0}
+            base_size => 0.17996400719856,
             buy => {
-                exchange => "gdax",        # ..{0}
-                gross_price => 491.1,      # ..{1}
-                gross_price_orig => 491.1, # ..{2}
-                net_price => 491.9,        # ..{3}
-                net_price_orig => 491.9,   # ..{4}
-                pair => "ETH/USD",         # ..{5}
-            },                              # .{1}
-            profit => 1.43971205758848,     # .{2}
-            profit_pct => 1.62634681845904, # .{3}
+                exchange => "gdax",
+                gross_price => 491.1,
+                gross_price_orig => 491.1,
+                net_price => 491.9,
+                net_price_orig => 491.9,
+                pair => "ETH/USD",
+            },
+            profit => 1.43971205758848,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                              # .{4}
-        }, # [0]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.0200359928014397, # .{0}
+            base_size => 0.0200359928014397,
             buy => {
-                exchange => "gdax",        # ..{0}
-                gross_price => 491.1,      # ..{1}
-                gross_price_orig => 491.1, # ..{2}
-                net_price => 491.9,        # ..{3}
-                net_price_orig => 491.9,   # ..{4}
-                pair => "ETH/USD",         # ..{5}
-            },                               # .{1}
-            profit => 0.160287942411518,     # .{2}
-            profit_pct => 1.62634681845904,  # .{3}
+                exchange => "gdax",
+                gross_price => 491.1,
+                gross_price_orig => 491.1,
+                net_price => 491.9,
+                net_price_orig => 491.9,
+                pair => "ETH/USD",
+            },
+            profit => 0.160287942411518,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                               # .{4}
-        }, # [1]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.17996400719856,  # .{0}
+            base_size => 0.17996400719856,
             buy => {
-                exchange => "gdax",      # ..{0}
-                gross_price => 493,      # ..{1}
-                gross_price_orig => 493, # ..{2}
-                net_price => 494,        # ..{3}
-                net_price_orig => 494,   # ..{4}
-                pair => "ETH/USD",       # ..{5}
-            },                              # .{1}
-            profit => 1.0617876424715,      # .{2}
-            profit_pct => 1.19433198380566, # .{3}
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 1.0617876424715,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                              # .{4}
-        }, # [2]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.17996400719856,  # .{0}
+            base_size => 0.17996400719856,
             buy => {
-                exchange => "gdax",      # ..{0}
-                gross_price => 493,      # ..{1}
-                gross_price_orig => 493, # ..{2}
-                net_price => 494,        # ..{3}
-                net_price_orig => 494,   # ..{4}
-                pair => "ETH/USD",       # ..{5}
-            },                              # .{1}
-            profit => 1.0617876424715,      # .{2}
-            profit_pct => 1.19433198380566, # .{3}
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 1.0617876424715,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                              # .{4}
-        }, # [3]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.17996400719856,  # .{0}
+            base_size => 0.17996400719856,
             buy => {
-                exchange => "gdax",      # ..{0}
-                gross_price => 493,      # ..{1}
-                gross_price_orig => 493, # ..{2}
-                net_price => 494,        # ..{3}
-                net_price_orig => 494,   # ..{4}
-                pair => "ETH/USD",       # ..{5}
-            },                              # .{1}
-            profit => 1.0617876424715,      # .{2}
-            profit_pct => 1.19433198380566, # .{3}
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 1.0617876424715,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                              # .{4}
-        }, # [4]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.17996400719856,  # .{0}
+            base_size => 0.17996400719856,
             buy => {
-                exchange => "gdax",      # ..{0}
-                gross_price => 493,      # ..{1}
-                gross_price_orig => 493, # ..{2}
-                net_price => 494,        # ..{3}
-                net_price_orig => 494,   # ..{4}
-                pair => "ETH/USD",       # ..{5}
-            },                              # .{1}
-            profit => 1.0617876424715,      # .{2}
-            profit_pct => 1.19433198380566, # .{3}
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 1.0617876424715,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                              # .{4}
-        }, # [5]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
         {
-            base_size => 0.0801439712057587, # .{0}
+            base_size => 0.0801439712057587,
             buy => {
-                exchange => "gdax",      # ..{0}
-                gross_price => 493,      # ..{1}
-                gross_price_orig => 493, # ..{2}
-                net_price => 494,        # ..{3}
-                net_price_orig => 494,   # ..{4}
-                pair => "ETH/USD",       # ..{5}
-            },                               # .{1}
-            profit => 0.472849430113975,     # .{2}
-            profit_pct => 1.19433198380566,  # .{3}
+                exchange => "gdax",
+                gross_price => 493,
+                gross_price_orig => 493,
+                net_price => 494,
+                net_price_orig => 494,
+                pair => "ETH/USD",
+            },
+            profit => 0.472849430113975,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
-                exchange => "indodax",       # ..{0}
-                gross_price => 500.1,        # ..{1}
-                gross_price_orig => 5001000, # ..{2}
-                net_price => 499.9,          # ..{3}
-                net_price_orig => 4999000,   # ..{4}
-                pair => "ETH/IDR",           # ..{5}
-            },                               # .{4}
-        }, # [6]
+                exchange => "indodax",
+                gross_price => 500.1,
+                gross_price_orig => 5001000,
+                net_price => 499.9,
+                net_price_orig => 4999000,
+                pair => "ETH/IDR",
+            },
+        },
     ];
 
     my $order_pairs = App::cryp::arbit::Strategy::merge_order_book::_calculate_order_pairs_for_base_currency(
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         max_order_quote_size => 90,
     );
 
@@ -1020,7 +1039,8 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.28,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1041,7 +1061,8 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
                 pair => "ETH/USD",
             },
             profit => 3.77599999999999,
-            profit_pct => 1.19433198380566,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1057,7 +1078,7 @@ subtest 'opt:max_order_size_as_book_item_size_pct' => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         max_order_size_as_book_item_size_pct => 80,
     );
 
@@ -1128,7 +1149,8 @@ subtest 'opt:min_account_balance' => sub {
                 pair => "ETH/USD",
             },
             profit => 1.04,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i1",
                 exchange => "indodax",
@@ -1151,7 +1173,8 @@ subtest 'opt:min_account_balance' => sub {
                 pair => "ETH/USD",
             },
             profit => 0.16,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 account => "i2",
                 exchange => "indodax",
@@ -1175,7 +1198,7 @@ subtest 'opt:min_account_balance' => sub {
         all_sell_orders   => $all_sell_orders,
         account_balances  => $account_balances,
         min_account_balances => $min_account_balances,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
     );
 
     is_deeply($order_pairs, $correct_order_pairs)
@@ -1231,7 +1254,8 @@ subtest "minimum buy base size" => sub {
                 pair => "ETH/USD",
             },
             profit => 4.71999999999998,
-            profit_pct => 1.19433198380566,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1247,7 +1271,7 @@ subtest "minimum buy base size" => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         exchange_pairs    => {
             gdax => [{base_currency=>"ETH", min_base_size=>0.5}],
         },
@@ -1305,7 +1329,8 @@ subtest "minimum buy quote size" => sub {
                 pair => "ETH/USD",
             },
             profit => 4.71999999999998,
-            profit_pct => 1.19433198380566,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1321,7 +1346,7 @@ subtest "minimum buy quote size" => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         exchange_pairs    => {
             gdax => [{base_currency=>"ETH", min_quote_size=>200}],
         },
@@ -1379,7 +1404,8 @@ subtest "minimum sell base size" => sub {
                 pair => "ETH/USD",
             },
             profit => 4.71999999999998,
-            profit_pct => 1.19433198380566,
+            net_profit_margin => 1.19433198380566,
+            trading_profit_margin => 1.19433198380566,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1395,7 +1421,7 @@ subtest "minimum sell base size" => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         exchange_pairs    => {
             indodax => [{base_currency=>"ETH", min_base_size=>0.5}],
         },
@@ -1455,7 +1481,8 @@ subtest "minimum sell quote size" => sub {
                 pair => "ETH/USD",
             },
             profit => 1.6,
-            profit_pct => 1.62634681845904,
+            net_profit_margin => 1.62634681845904,
+            trading_profit_margin => 1.62634681845904,
             sell => {
                 exchange => "indodax",
                 gross_price => 500.1,
@@ -1471,7 +1498,7 @@ subtest "minimum sell quote size" => sub {
         base_currency  => "ETH",
         all_buy_orders    => $all_buy_orders,
         all_sell_orders   => $all_sell_orders,
-        min_profit_pct    => 0,
+        min_net_profit_margin    => 0,
         exchange_pairs    => {
             indodax => [{base_currency=>"ETH", min_quote_size=>200}],
         },

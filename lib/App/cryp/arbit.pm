@@ -36,7 +36,7 @@ our %args_db = (
     },
 );
 
-# shared between these subcommands: show, arbit
+# shared between these subcommands: opportunities, arbit
 our %args_arbit_common = (
     strategy => {
         summary => 'Which strategy to use for arbitration',
@@ -91,22 +91,23 @@ against BTC, `base_currencies` is ['XMR', 'LTC'] and `quote_currencies` is
 
 _
     },
-    min_profit_pct => {
-        summary => 'What minimum percentage of price difference should '.
-            'trigger an arbitrage transaction',
+    min_net_profit_margin => {
+        summary => 'Minimum net profit margin that will trigger an arbitrage '.
+            'trading, in percentage',
         schema => 'float*',
         default => 0,
         description => <<'_',
 
-Below this percentage number, no order pairs will be made to do the arbitrage.
-Note that the price difference that will be considered is the *net* price
-difference (after subtracted by trading fees and forex spread).
+Below this percentage number, no order pairs will be sent to the exchanges to do
+the arbitrage. Note that the net profit margin already takes into account
+trading fees and forex spread (see Glossary section for more details and
+illustration).
 
 Suggestion: If you set this option too high, there might not be any order pairs
-possible. If you set this option too low, you will be getting thin profits. Run
-`cryp-arbit show` or `cryp-arbit arbit --dry-run` for a while to see what the
-average percentage is and then decide at which point you want to perform
-arbitrage.
+possible. If you set this option too low, you will be getting too thin profits.
+Run `cryp-arbit opportunities` or `cryp-arbit arbit --dry-run` for a while to
+see what the average percentage is and then decide at which point you want to
+perform arbitrage.
 
 _
     },
@@ -227,8 +228,8 @@ our $db_schema_spec = {
              base_currency VARCHAR(10) NOT NULL, -- the currency we are arbitraging, e.g. LTC
              base_size DECIMAL(21,8) NOT NULL, -- amount of "currency" that we are arbitraging (sell on "sell exchange" and buy on "buy exchange")
 
-             expected_profit_pct DOUBLE NOT NULL, -- expected profit percentage (after trading fees)
-             expected_profit DOUBLE NOT NULL, -- expected profit (after trading fees) in quote currency (converted to USD if fiat) if fully executed
+             expected_profit_margin DOUBLE NOT NULL, -- expected profit percentage (after trading fees & forex spread)
+             expected_net_profit DOUBLE NOT NULL, -- expected net profit (after trading fees & forex spread) in quote currency (converted to USD if fiat) if fully executed
 
              -- we buy "base_size" of "base_currency" on "buy exchange" at
              -- "buy_gross_price_orig" (in "buy_quote_currency") a.k.a
@@ -272,7 +273,7 @@ our $db_schema_spec = {
          )',
 
         'CREATE TABLE arbit_order_log (
-            id INT NOT NULL PRIMARY KEY,
+            id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
             order_pair_id INT NOT NULL,
             type VARCHAR(4) NOT NULL, -- "buy" or "sell"
             summary TEXT NOT NULL
@@ -660,43 +661,44 @@ sub _format_order_pairs_response {
 
     # format for table display
     my @res;
-    for my $order_pair (@$order_pairs) {
-        my $size = $order_pair->{base_size};
-        my ($base_currency, $buy_currency)  = $order_pair->{buy}{pair}  =~ m!(.+)/(.+)!;
-        my ($sell_currency) = $order_pair->{sell}{pair} =~ m!/(.+)!;
+    for my $op (@$order_pairs) {
+        my $size = $op->{base_size};
+        my ($base_currency, $buy_currency)  = $op->{buy}{pair}  =~ m!(.+)/(.+)!;
+        my ($sell_currency) = $op->{sell}{pair} =~ m!/(.+)!;
         my $profit_currency = _is_fiat($buy_currency) ? 'USD' : $buy_currency;
 
         my $rec = {
             size     => $size,
             currency => $base_currency,
-            buy_from => $order_pair->{buy}{exchange},
+            buy_from => $op->{buy}{exchange},
             buy_currency     => $buy_currency,
-            buy_gross_price  => $order_pair->{buy}{gross_price_orig},
-            buy_net_price    => $order_pair->{buy}{net_price_orig},
-            sell_to          => $order_pair->{sell}{exchange},
+            buy_gross_price  => $op->{buy}{gross_price_orig},
+            sell_to          => $op->{sell}{exchange},
             sell_currency    => $sell_currency,
-            sell_gross_price => $order_pair->{sell}{gross_price_orig},
-            sell_net_price   => $order_pair->{sell}{net_price_orig},
-            profit_pct       => $order_pair->{profit_pct},
+            sell_gross_price => $op->{sell}{gross_price_orig},
+            (gross_profit_margin   => $op->{gross_profit_margin})   x !!exists($op->{gross_profit_margin}),
+            (trading_profit_margin => $op->{trading_profit_margin}) x !!exists($op->{trading_profit_margin}),
+            (forex_spread          => $op->{forex_spread})          x !!exists($op->{forex_spread}),
+            (net_profit_margin     => $op->{net_profit_margin})     x !!exists($op->{net_profit_margin}),
             profit_currency  => $profit_currency,
-            profit           => $order_pair->{profit},
+            profit           => $op->{profit},
         };
         if (_is_fiat($buy_currency) && $buy_currency ne 'USD') {
-            $rec->{buy_gross_price_usd} = $order_pair->{buy}{gross_price};
-            $rec->{buy_net_price_usd}   = $order_pair->{buy}{net_price};
+            $rec->{buy_gross_price_usd} = $op->{buy}{gross_price};
+            #$rec->{buy_net_price_usd}   = $op->{buy}{net_price};
         }
         if (_is_fiat($sell_currency) && $sell_currency ne 'USD') {
-            $rec->{sell_gross_price_usd} = $order_pair->{sell}{gross_price};
-            $rec->{sell_net_price_usd}   = $order_pair->{sell}{net_price};
+            $rec->{sell_gross_price_usd} = $op->{sell}{gross_price};
+            #$rec->{sell_net_price_usd}   = $op->{sell}{net_price};
         }
         push @res, $rec;
     }
 
     my $resmeta = {};
-    $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_net_price', 'buy_gross_price_usd', 'buy_net_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_net_price', 'sell_gross_price_usd', 'sell_net_price_usd', 'profit_pct', 'profit_currency', 'profit'];
-    $resmeta->{'table.field_labels'}  = [undef,  'c',         undef,     'buy_c',        'buy_gross_p',     'buy_net_p',     'buy_gross_p_usd',     'buy_net_p_usd',     undef,     'sell_c',        undef,              undef,            'sell_gross_p_usd',     'sell_net_p_usd',     undef,        'profit_c',        undef];
-    $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,          $fnum8,                $fnum8,              undef,     undef,           $fnum8,             $fnum8,           $fnum8,                 $fnum8,               $fnum4,       undef,             $fnum8];
-    $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',         'right',               'right',             'left',    'left',          'right',            'right',          'right',                'right',              'right',      'left',            'right'];
+    $resmeta->{'table.fields'}        = ['size', 'currency', 'buy_from', 'buy_currency', 'buy_gross_price', 'buy_gross_price_usd', 'sell_to', 'sell_currency', 'sell_gross_price', 'sell_gross_price_usd', 'gross_profit_margin', 'trading_profit_margin', 'forex_spread', 'net_profit_margin', 'profit_currency', 'profit'];
+    $resmeta->{'table.field_labels'}  = [undef,  'c',        'buyFrom',  'buyC',         'buyGrossP',       'buyGrossP.USD',       'sellTo',  'sellC',         'sellGrossP',       'sellGrossP.USD',       'grossProfitM',        'trdProfitM',            'fxSpread',     'netProfitM',       'profitC',          undef];
+    $resmeta->{'table.field_formats'} = [$fnum8, undef,      undef,      undef,          $fnum8,            $fnum8,                undef,     undef,           $fnum8,             $fnum8,                 $fnum4,                $fnum4,                  $fnum4,         $fnum4,              undef,             $fnum8];
+    $resmeta->{'table.field_aligns'}  = ['right', 'left',   'left',      'left',         'right',           'right',               'left',    'left',          'right',            'right',                'left',                'right',                 'right',        'right',             'left',            'right'];
 
     [200, "OK", \@res, $resmeta];
 }
@@ -709,14 +711,14 @@ sub _create_orders {
     local $dbh->{RaiseError};
 
   ORDER_PAIR:
-    for my $order_pair (@{ $r->{_stash}{order_pairs} }) {
+    for my $op (@{ $r->{_stash}{order_pairs} }) {
         my $is_err;
         my $do_cancel_buy_order_on_err;
         my $do_cancel_sell_order_on_err;
 
-        log_debug "Creating order pair on the exchanges: %s ...", $order_pair;
-        my $buy  = $order_pair->{buy};
-        my $sell = $order_pair->{sell};
+        log_debug "Creating order pair on the exchanges: %s ...", $op;
+        my $buy  = $op->{buy};
+        my $sell = $op->{sell};
         my $buy_eid  = _get_exchange_id($r, $buy ->{exchange});
         my $buy_aid  = _get_account_id ($r, $buy ->{exchange}, $buy ->{account});
         my ($buy_quotecur) = $buy->{pair} =~ m!/(.+)!;
@@ -730,7 +732,7 @@ sub _create_orders {
             "INSERT INTO order_pair (
                ctime,
                base_currency, base_size,
-               expected_profit_pct, expected_profit,
+               expected_net_profit_margin, expected_net_profit,
 
                buy_exchange_id , buy_account_id , buy_quote_currency , buy_gross_price_orig , buy_gross_price , buy_status,
                sell_exchange_id, sell_account_id, sell_quote_currency, sell_gross_price_orig, sell_gross_price, sell_status
@@ -747,8 +749,8 @@ sub _create_orders {
             {},
 
             $time,
-            $order_pair->{base_currency}, $order_pair->{base_size},
-            $order_pair->{profit_pct}, $order_pair->{profit},
+            $op->{base_currency}, $op->{base_size},
+            $op->{net_profit_margin}, $op->{net_profit},
 
             $buy_eid , $buy_aid , $buy_quotecur , $buy ->{gross_price_orig}, $buy ->{gross_price}, 'creating',
             $sell_eid, $sell_aid, $sell_quotecur, $sell->{gross_price_orig}, $sell->{gross_price}, 'creating',
@@ -766,7 +768,7 @@ sub _create_orders {
                 pair => $buy->{pair},
                 type => 'buy',
                 price => $buy->{gross_price_orig},
-                base_size => $order_pair->{base_size},
+                base_size => $op->{base_size},
             );
             unless ($res->[0] == 200) {
                 log_error "Couldn't create buy order: %s", $res;
@@ -803,7 +805,7 @@ sub _create_orders {
                 pair => $sell->{pair},
                 type => 'sell',
                 price => $sell->{gross_price_orig},
-                base_size => $order_pair->{base_size},
+                base_size => $op->{base_size},
             );
             unless ($res->[0] == 200) {
                 log_error "Couldn't create sell order: %s", $res;
@@ -883,9 +885,16 @@ sub dump_cryp_config {
     [200, "OK", $r->{_cryp}];
 }
 
-$SPEC{show} = {
+$SPEC{show_opportunities} = {
     v => 1.1,
-    summary => 'Show arbitrage possibilities',
+    summary => 'Show arbitrage opportunities',
+    description => <<'_',
+
+This subcommand, like the `arbit` subcommand, checks prices of cryptocurrencies
+on several exchanges for arbitrage possibility; but does not actually perform
+the arbitraging.
+
+_
     args => {
         %args_db,
         %args_arbit_common,
@@ -901,7 +910,7 @@ $SPEC{show} = {
         },
     },
 };
-sub show {
+sub show_opportunities {
     my %args = @_;
 
     my $r = $args{-cmdline_r};
@@ -935,14 +944,15 @@ e.g. LTC) in several cryptoexchanges. The "quote currency" can be fiat (e.g.
 USD, all other fiat currencies will be converted to USD) or another
 cryptocurrency (usually BTC).
 
-When it detects a price difference for a base currency that is large enough (see
-`min_profit_pct` option), it will perform a buy order on the exchange that has
-the lower price and sell the exact same amount of base currency on the exchange
-that has the higher price. For example, if on XCHG1 the buy price of LTC 100.01
-USD and on XCHG2 the sell price of LTC is 98.80 USD, then this utility will buy
-LTC on XCHG2 for 98.80 USD and sell the same amount of LTD on XCHG1 for 100.01
-USD. The profit is (100.01 - 98.80 - trading fees) per LTC arbitraged. You have
-to maintain enough LTC balance on XCHG1 and enough USD balance on XCHG2.
+When it detects a net price difference for a base currency that is large enough
+(see `min_net_profit_margin` option), it will perform a buy order on the
+exchange that has the lower price and sell the exact same amount of base
+currency on the exchange that has the higher price. For example, if on XCHG1 the
+buy price of LTC 100.01 USD and on XCHG2 the sell price of LTC is 98.80 USD,
+then this utility will buy LTC on XCHG2 for 98.80 USD and sell the same amount
+of LTD on XCHG1 for 100.01 USD. The profit is (100.01 - 98.80 - trading fees)
+per LTC arbitraged. You have to maintain enough LTC balance on XCHG1 and enough
+USD balance on XCHG2.
 
 The balances are called inventories or your working capital. You fill and
 transfer inventories manually to refill balances and/or to collect profits.
@@ -986,7 +996,7 @@ sub arbit {
     my $r = $args{-cmdline_r};
     # XXX schema
     my $strategy = $args{strategy} // 'merge_order_book';
-    $args{min_profit_pct} > 0 or return [412, "Refusing to do arbitrage with no positive min_profit_pct"];
+    $args{min_net_profit_margin} > 0 or return [412, "Refusing to do arbitrage with no positive min_net_profit_margin"];
 
     my $res;
 
@@ -1019,7 +1029,7 @@ sub arbit {
 
         if ($args{-dry_run}) {
             if ($args{rounds} == 1) {
-                log_info "[DRY-RUN] Will not actually be creating order pairs on the exchanges, showing order pairs ...";
+                log_info "[DRY-RUN] Will not actually be creating order pairs on the exchanges, showing possible order pairs ...";
                 return _format_order_pairs_response($r->{_stash}{order_pairs});
             } else {
                 log_info "[DRY-RUN] Will not actually be creating order pairs on the exchanges, waiting for next round ...";
@@ -1061,7 +1071,7 @@ sub _check_orders {
             return;
         };
         $dbh->do(
-            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?)",
             {},
             $id, 'buy', "status changed to $status" . ($summary ? ": $summary" : ""),
         );
@@ -1081,7 +1091,7 @@ sub _check_orders {
             return;
         };
         $dbh->do(
-            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?)",
             {},
             $id, 'sell', "status changed to $status" . ($summary ? ": $summary" : ""),
         );
@@ -1101,7 +1111,7 @@ sub _check_orders {
             return;
         };
         $dbh->do(
-            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?)",
             {},
             $id, 'buy', "filled_base_size changed to $size" . ($summary ? ": $summary" : ""),
         );
@@ -1121,7 +1131,7 @@ sub _check_orders {
             return;
         };
         $dbh->do(
-            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?,?)",
+            "INSERT INTO arbit_order_log (order_pair_id, type, summary) VALUES (?,?,?)",
             {},
             $id, 'sell', "filled_base_size changed to $size" . ($summary ? ": $summary" : ""),
         );
@@ -1145,8 +1155,10 @@ sub _check_orders {
            op.sell_order_id sell_order_id
          FROM order_pair op
          WHERE
-           op.buy_status  NOT IN ('done','cancelled') OR
-           op.sell_status NOT IN ('done','cancelled')
+           (op.buy_order_id IS NOT NULL AND
+            op.buy_status  NOT IN ('done','filled','cancelled')) OR
+           (op.sell_order_id IS NOT NULL AND
+            op.sell_status NOT IN ('done','filled','cancelled'))
          ORDER BY op.ctime");
     $sth->execute;
     while (my $row = $sth->fetchrow_hashref) {
@@ -1246,6 +1258,56 @@ Please see included script L<cryp-arbit>.
 =item * inventory
 
 =item * order pair
+
+=item * gross profit margin
+
+Price difference percentage of a cryptocurrency between two exchanges, without
+taking into account trading fees and foreign exchange spread.
+
+For example, suppose BTC is being offered (ask price, sell price) at 7010 USD on
+exchange1 and is being bidden (bid price, buy price) at 7150 USD on exchange2.
+This means there is a (7150-7010)/7010 = 1.997% gross profit margin. We can buy
+BTC on exchange1 for 7010 USD then sell the same amout of BTC on exchange2 for
+7150 USD and gain (7150-7010) = 140 USD per BTC, before fees.
+
+=item * trading profit margin
+
+Price difference percentage of a cryptocurrency between two exchanges, after
+taking into account trading fees.
+
+For example, suppose BTC is being offered (ask price, sell price) at 7010 USD on
+exchange1 and is being bidden (bid price, buy price) at 7150 USD on exchange2.
+Trading (market maker) fee on exchange1 is 0.3% and on exchange2 is 0.25%. After
+trading fees, the ask price becomes 7010 * (1+0.3%) = 7031.03 USD and the bid
+price becomes 7150 * (1-0.25%) = 7132.125. The trading profit margin is
+(7132.125-7031.03)/7031.03 = 1.438%. We can buy BTC on exchange1 for 7010 USD
+then sell the same amout of BTC on exchange2 for 7150 USD and still gain
+(7132.125-7031.03) = 101.095 USD per BTC, after trading fees.
+
+=item * net profit margin
+
+Price difference percentage of a cryptocurrency between two exchanges, after
+taking into account trading fees and foreign exchange spread. If the price on
+both exchanges are quoted in the same currency (e.g. USD) then there is no forex
+spread and net profit margin is the same as trading profit margin.
+
+If the quoting currencies are different, e.g. USD on exchange1 and IDR on
+exchange2, then first we calculate gross and trading profit margin using prices
+converted to USD using average forex rate (highest forex dealer's sell price +
+lowest buy price, divided by two). Then we subtract trading profit margin with
+forex spread for safety.
+
+For example, suppose BTC is being offered (ask price, sell price) at 7010 USD on
+exchange1 and is being bidden (bid price, buy price) at 99,500,000 IDR on
+exchange2. The forex rate for USD/IDR is: buy 13,895, sell 13,925, average
+(13,925+13,895)/2 = 13,910, spread (13,925-13,895)/13,895 = 0.216%. The price on
+exchange2 in USD is 99,500,000 / 13,910 = 7153.127 USD. Trading (market maker)
+fee on exchange1 is 0.3% and on exchange2 is 0.25%. After trading fees, the ask
+price becomes 7010 * (1+0.3%) = 7031.03 USD and the bid price becomes 7153.127 *
+(1-0.25%) = 7135.244. The trading profit margin is (7135.244-7031.03)/7031.03 =
+1.482%. We can buy BTC on exchange1 for 7010 USD then sell the same amout of BTC
+on exchange2 for 7150 USD and still gain (7132.125-7031.03) = 101.095 USD per
+BTC, after trading fees. The net profit margin is 1.482% - 0.216% = 1.266%.
 
 =back
 

@@ -19,7 +19,7 @@ Perinci::CmdLine::cryp->new(
     subcommands => {
         "dump-cryp-config" => { url=>"${prefix}dump_cryp_config" },
         arbit => { url=>"${prefix}arbit" },
-        show => { url=>"${prefix}show" },
+        opportunities => { url=>"${prefix}show_opportunities" },
         'check-orders' => { url=>"${prefix}check_orders" },
     },
 )->run;
@@ -48,7 +48,7 @@ can be shared between cryp-* family of scripts):
 
 Then to test:
 
- % cryp-arbit show
+ % cryp-arbit opportunities
  % cryp-arbit arbit --debug --dry-run
 
 To really submit sell/buy orders:

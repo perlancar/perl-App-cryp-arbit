@@ -23,7 +23,7 @@ sub _calculate_order_pairs_for_base_currency {
     my $base_currency         = $args{base_currency};
     my $all_buy_orders        = $args{all_buy_orders};
     my $all_sell_orders       = $args{all_sell_orders};
-    my $min_profit_pct        = $args{min_profit_pct} // 0;
+    my $min_net_profit_margin = $args{min_net_profit_margin} // 0;
     my $max_order_quote_size  = $args{max_order_quote_size};
     my $max_order_pairs       = $args{max_order_pairs};
     my $max_order_size_as_book_item_size_pct = $args{max_order_size_as_book_item_size_pct} // 100;
@@ -101,12 +101,13 @@ sub _calculate_order_pairs_for_base_currency {
             last CREATE unless $buy_index < @$all_sell_orders;
         }
 
-        my $smaller_price = min($sell->{net_price}, $buy->{net_price});
-        my $profit_pct    = ($sell->{net_price} - $buy->{net_price}) /
-            $smaller_price * 100;
-        if ($profit_pct < $min_profit_pct) {
-            log_trace "Ending matching buy->sell because profit percentage is too low (%.4f, wants >= %.4f)",
-                $profit_pct, $min_profit_pct;
+        my $gross_profit_margin = ($sell->{gross_price} - $buy->{gross_price}) /
+            min($sell->{gross_price}, $buy->{gross_price}) * 100;
+        my $trading_profit_margin = ($sell->{net_price} - $buy->{net_price}) /
+            min($sell->{net_price}, $buy->{net_price}) * 100;
+        if ($trading_profit_margin < $min_net_profit_margin) {
+            log_trace "Ending matching buy->sell because trading profit margin is too low (%.4f%%, wants >= %.4f%%%)",
+                $trading_profit_margin, $min_net_profit_margin;
             last CREATE;
         }
 
@@ -127,7 +128,8 @@ sub _calculate_order_pairs_for_base_currency {
                 net_price_orig   => $buy->{net_price_orig},
                 net_price        => $buy->{net_price},
             },
-            profit_pct => $profit_pct,
+            gross_profit_margin => $gross_profit_margin,
+            trading_profit_margin => $trading_profit_margin,
         };
 
         if ($account_balances) {
@@ -268,7 +270,12 @@ sub _calculate_order_pairs_for_base_currency {
             $i++;
             my ($bcur) = $op->{buy}{pair}  =~ m!/(.+)!;
             my ($scur) = $op->{sell}{pair} =~ m!/(.+)!;
-            next if $bcur eq $scur;
+
+            if ($bcur eq $scur) {
+                # there is no forex spread
+                $op->{net_profit_margin} = $op->{trading_profit_margin};
+                next ORDER_PAIR;
+            }
 
             my $spread;
             $spread = $forex_spreads->{"$bcur/$scur"} if $forex_spreads;
@@ -279,17 +286,15 @@ sub _calculate_order_pairs_for_base_currency {
                     $i, $op->{buy}{pair}, $op->{sell}{pair}, $bcur, $scur;
                 next ORDER_PAIR;
             }
-            log_trace "Order pair #%d (buy %s - sell %s, %.4f%%): adjusting ".
+            log_trace "Order pair #%d (buy %s - sell %s, trading profit margin %.4f%%): adjusting ".
                 "with %s/%s forex spread %.4f%%",
-                $i, $op->{buy}{pair}, $op->{sell}{pair}, $op->{profit_pct}, $bcur, $scur, $spread;
-            my $orig_profit_pct = $op->{profit_pct};
-            $op->{profit_pct} -= $spread;
-            $op->{profit} *= $op->{profit_pct} / $orig_profit_pct;
-            $op->{fx_spread} = $spread;
-            $op->{profit_pct0} = $orig_profit_pct;
-            if ($op->{profit_pct} < $min_profit_pct) {
-                log_trace "Order pair #%d: After forex spread adjustment, profit percentage is too small (%.4f, wants >= %.4f), skipping this order pair",
-                    $i, $op->{profit_pct}, $min_profit_pct;
+                $i, $op->{buy}{pair}, $op->{sell}{pair}, $op->{trading_profit_margin}, $bcur, $scur, $spread;
+            $op->{forex_spread} = $spread;
+            $op->{net_profit_margin} = $op->{trading_profit_margin} - $spread;
+            $op->{profit} *= $op->{net_profit_margin} / $op->{trading_profit_margin};
+            if ($op->{net_profit_margin} < $min_net_profit_margin) {
+                log_trace "Order pair #%d: After forex spread adjustment, net profit margin is too small (%.4f%%, wants >= %.4f%%), skipping this order pair",
+                    $i, $op->{net_profit_margin}, $min_net_profit_margin;
                 next ORDER_PAIR;
             }
             push @order_pairs, $op;
@@ -297,7 +302,7 @@ sub _calculate_order_pairs_for_base_currency {
     } # ADJUST_FOREX_SPREAD
 
     # re-sort
-    @order_pairs = sort { $b->{profit_pct} <=> $a->{profit_pct} } @order_pairs;
+    @order_pairs = sort { $b->{net_profit_margin} <=> $a->{net_profit_margin} } @order_pairs;
 
     \@order_pairs;
 }
@@ -617,7 +622,7 @@ sub calculate_order_pairs {
             base_currency => $base_currency,
             all_buy_orders => \@all_buy_orders,
             all_sell_orders => \@all_sell_orders,
-            min_profit_pct => $r->{args}{min_profit_pct},
+            min_net_profit_margin => $r->{args}{min_net_profit_margin},
             max_order_quote_size => $r->{args}{max_order_quote_size},
             max_order_size_as_book_item_size_pct => $r->{_cryp}{arbit_strategies}{merge_order_book}{max_order_size_as_book_item_size_pct},
             max_order_pairs      => $r->{args}{max_order_pairs_per_round},
@@ -721,9 +726,9 @@ long time and incurs relatively high network fees. Instead, we maintain bitcoin
 and USD balances on each exchange to be able to buy/sell quickly. The balances
 serve as "working capital" or "inventory".
 
-The minimum profit percentage is I<min_profit_pct>. We create buy/sell order
-pairs starting from the topmost of the merged order book, until we can't get
-I<min_profit_pct> anymore.
+The minimum net profit margin is I<min_net_profit_margin>. We create buy/sell
+order pairs starting from the topmost of the merged order book, until we can't
+get I<min_net_profit_margin> anymore.
 
 Then we monitor our order pairs and cancel them if they remain unfilled for a
 while.
