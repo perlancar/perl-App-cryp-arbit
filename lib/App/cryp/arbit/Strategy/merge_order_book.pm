@@ -186,7 +186,9 @@ sub _calculate_order_pairs_for_base_currency {
         my $order_size = $sizes[0]{size};
 
         $order_pair->{base_size} = $order_size;
-        $order_pair->{profit}   = $order_size *
+        $order_pair->{gross_profit} = $order_size *
+            ($order_pair->{sell}{gross_price} - $order_pair->{buy}{gross_price});
+        $order_pair->{trading_profit} = $order_size *
             ($order_pair->{sell}{net_price} - $order_pair->{buy}{net_price});
 
       UPDATE_INVENTORY_BALANCES:
@@ -296,6 +298,7 @@ sub _calculate_order_pairs_for_base_currency {
             if ($bcur eq $scur) {
                 # there is no forex spread
                 $op->{net_profit_margin} = $op->{trading_profit_margin};
+                $op->{net_profit} = $op->{trading_profit};
                 next ORDER_PAIR;
             }
 
@@ -313,7 +316,7 @@ sub _calculate_order_pairs_for_base_currency {
                 $i, $op->{buy}{pair}, $op->{sell}{pair}, $op->{trading_profit_margin}, $bcur, $scur, $spread;
             $op->{forex_spread} = $spread;
             $op->{net_profit_margin} = $op->{trading_profit_margin} - $spread;
-            $op->{profit} *= $op->{net_profit_margin} / $op->{trading_profit_margin};
+            $op->{net_profit} = $op->{trading_profit} * $op->{net_profit_margin} / $op->{trading_profit_margin};
             if ($op->{net_profit_margin} < $min_net_profit_margin) {
                 log_trace "Order pair #%d: After forex spread adjustment, net profit margin is too small (%.4f%%, wants >= %.4f%%), skipping this order pair",
                     $i, $op->{net_profit_margin}, $min_net_profit_margin;
