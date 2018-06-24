@@ -221,6 +221,22 @@ our $db_schema_spec = {
              note VARCHAR(255)
          )',
 
+        # currently unused
+        'CREATE TABLE arbit_opportunity (
+             id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
+             time DOUBLE NOT NULL, INDEX(time),
+             base_currency VARCHAR(10) NOT NULL,
+             quote_currency VARCHAR(10) NOT NULL,
+             -- base_size DECIMAL(21,8),
+             buy_exchange_id INT NOT NULL,
+             buy_price DECIMAL(21,8) NOT NULL,
+             sell_exchange_id INT NOT NULL,
+             sell_price DECIMAL(21,8) NOT NULL,
+             gross_profit_margin DOUBLE NOT NULL,
+             trading_profit_margin DOUBLE NOT NULL,
+             net_profit_margin DOUBLE
+         )',
+
         'CREATE TABLE order_pair (
              id INT NOT NULL PRIMARY KEY AUTO_INCREMENT,
              ctime DOUBLE NOT NULL, INDEX(ctime), -- create time in our database

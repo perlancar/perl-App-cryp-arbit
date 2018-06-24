@@ -12,6 +12,7 @@ require App::cryp::arbit;
 use Finance::Currency::FiatX;
 use List::Util qw(min max);
 use Storable qw(dclone);
+use Time::HiRes qw(time);
 
 use Role::Tiny::With;
 
@@ -33,6 +34,7 @@ sub _calculate_order_pairs_for_base_currency {
     my $forex_spreads         = $args{forex_spreads};
 
     my @order_pairs;
+    my $opportunity;
 
     for (@{ $all_buy_orders }, @{ $all_sell_orders }) {
         $_->{base_size} *= $max_order_size_as_book_item_size_pct/100;
@@ -105,6 +107,26 @@ sub _calculate_order_pairs_for_base_currency {
             min($sell->{gross_price}, $buy->{gross_price}) * 100;
         my $trading_profit_margin = ($sell->{net_price} - $buy->{net_price}) /
             min($sell->{net_price}, $buy->{net_price}) * 100;
+
+        # record opportunity, the currently highest trading profit margin
+        unless ($opportunity) {
+            my $quote_currency = $sell->{quote_currency};
+            if (App::cryp::arbit::_is_fiat($quote_currency)) {
+                $quote_currency = "USD";
+            }
+            $opportunity = {
+                time => time(),
+                base_currency         => $base_currency,
+                quote_currency        => $quote_currency,
+                buy_exchange          => $buy->{exchange},
+                buy_price             => $buy->{gross_price},
+                sell_exchange         => $sell->{exchange},
+                sell_price            => $sell->{gross_price},
+                gross_profit_margin   => $gross_profit_margin,
+                trading_profit_margin => $trading_profit_margin,
+            };
+        }
+
         if ($trading_profit_margin < $min_net_profit_margin) {
             log_trace "Ending matching buy->sell because trading profit margin is too low (%.4f%%, wants >= %.4f%%%)",
                 $trading_profit_margin, $min_net_profit_margin;
@@ -304,7 +326,7 @@ sub _calculate_order_pairs_for_base_currency {
     # re-sort
     @order_pairs = sort { $b->{net_profit_margin} <=> $a->{net_profit_margin} } @order_pairs;
 
-    \@order_pairs;
+    (\@order_pairs, $opportunity);
 }
 
 sub calculate_order_pairs {
@@ -618,7 +640,7 @@ sub calculate_order_pairs {
         #log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
         #log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
 
-        my $coin_order_pairs = _calculate_order_pairs_for_base_currency(
+        my ($coin_order_pairs, $opportunity) = _calculate_order_pairs_for_base_currency(
             base_currency => $base_currency,
             all_buy_orders => \@all_buy_orders,
             all_sell_orders => \@all_sell_orders,
@@ -635,6 +657,21 @@ sub calculate_order_pairs {
             $_->{base_currency} = $base_currency;
         }
         push @order_pairs, @$coin_order_pairs;
+        if ($opportunity) {
+            $dbh->do("INSERT INTO arbit_opportunity
+                        (time,base_currency,quote_currency,buy_exchange_id,buy_price,sell_exchange_id,sell_price,gross_profit_margin,trading_profit_margin) VALUES
+                        (?   ,?            ,?             ,?              ,?        ,?               ,?         ,?                  ,?                    )", {},
+                     $opportunity->{time},
+                     $opportunity->{base_currency},
+                     $opportunity->{quote_currency},
+                     App::cryp::arbit::_get_exchange_id($r, $opportunity->{buy_exchange}),
+                     $opportunity->{buy_price},
+                     App::cryp::arbit::_get_exchange_id($r, $opportunity->{sell_exchange}),
+                     $opportunity->{sell_price},
+                     $opportunity->{gross_profit_margin},
+                     $opportunity->{trading_profit_margin},
+                 );
+        }
     } # for set (base currency)
 
     [200, "OK", \@order_pairs];
