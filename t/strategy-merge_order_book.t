@@ -73,7 +73,7 @@ subtest 'opt:min_net_profit_margin' => sub {
         min_net_profit_margin    => 1.6,
     );
 
-    use DD; dd $order_pairs;
+    #use DD; dd $order_pairs;
     is_deeply($order_pairs, $correct_order_pairs)
         or diag explain $order_pairs;
 };

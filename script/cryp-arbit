@@ -21,6 +21,7 @@ Perinci::CmdLine::cryp->new(
         arbit => { url=>"${prefix}arbit" },
         opportunities => { url=>"${prefix}show_opportunities" },
         'check-orders' => { url=>"${prefix}check_orders" },
+        'profit-report' => { url=>"${prefix}get_profit_report" },
     },
 )->run;
 
@@ -51,9 +52,18 @@ Then to test:
  % cryp-arbit opportunities
  % cryp-arbit arbit --debug --dry-run
 
-To really submit sell/buy orders:
+To really create sell/buy orders:
 
  % cryp-arbit arbit
+
+To check the status of created orders (and cancel orders that are not being
+filled for too long):
+
+ % cryp-arbit check-orders
+
+To get profit report:
+
+ % cryp-arbit profit-report
 
 For other subcommands, use C<cryp-arbit --help> or see the documentation.
 

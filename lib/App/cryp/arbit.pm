@@ -1259,6 +1259,115 @@ sub check_orders {
     [200];
 }
 
+$SPEC{get_profit_report} = {
+    v => 1.1,
+    summary => 'Get profit report',
+    args => {
+        %args_db,
+        time_start => {
+            schema => 'date*',
+            tags => ['category:filtering'],
+        },
+        time_end => {
+            schema => 'date*',
+            tags => ['category:filtering'],
+        },
+    },
+};
+sub get_profit_report {
+    my %args = @_;
+
+    my $r = $args{-cmdline_r};
+
+    # [ux] remove extraneous arguments supplied by config
+    delete $r->{args}{accounts};
+
+    my $res;
+
+    $res = _init($r); return $res unless $res->[0] == 200;
+
+    my $dbh = $r->{_stash}{dbh};
+
+    my @wheres;
+    my @binds;
+    if ($args{time_start}) {
+        push @wheres, "ctime >= ?";
+        push @binds, $args{time_start};
+    }
+    if ($args{time_end}) {
+        push @wheres, "ctime <= ?";
+        push @binds, $args{time_end};
+    }
+    my $sth = $dbh->prepare(
+        "SELECT *, eb.safename buy_exchange, es.safename sell_exchange
+         FROM order_pair op
+         LEFT JOIN exchange eb ON op.buy_exchange_id=eb.id
+         LEFT JOIN exchange es ON op.sell_exchange_id=es.id
+         ".
+            (@wheres ? "WHERE ".join(" AND ", @wheres)." " : "").
+            "ORDER BY ctime");
+    $sth->execute(@binds);
+
+    my @recs;
+    my %sums; # key = currency
+    while (my $op = $sth->fetchrow_hashref) {
+      RECORD_BUY: {
+            last unless defined $op->{buy_filled_base_size} && $op->{buy_filled_base_size};
+            my $frac_b = $op->{buy_filled_base_size} / $op->{buy_actual_base_size};
+            my $rec_b = {
+                time     => int $op->{ctime},
+                currency => $op->{base_currency},
+                amount   => $frac_b * $op->{buy_actual_base_size},
+                summary  => "bought on $op->{buy_exchange} \@$op->{buy_actual_price}",
+            };
+            my $rec_q = {
+                time     => int $op->{ctime},
+                currency => $op->{buy_quote_currency},
+                amount   => -$frac_b * $op->{buy_actual_base_size} * $op->{buy_actual_price},
+                summary  => "spent on $op->{buy_exchange} for buying $op->{base_currency} \@$op->{buy_actual_price}",
+            };
+            $sums{ $op->{base_currency}      } += $rec_b->{amount};
+            $sums{ $op->{buy_quote_currency} } += $rec_q->{amount};
+            push @recs, $rec_b, $rec_q;
+        }
+      RECORD_SELL: {
+            last unless defined $op->{sell_filled_base_size} && $op->{sell_filled_base_size};
+            my $frac_s = $op->{sell_filled_base_size} / $op->{sell_actual_base_size};
+            my $rec_b = {
+                time     => int $op->{ctime},
+                currency => $op->{base_currency},
+                amount   => -$frac_s * $op->{sell_actual_base_size},
+                summary  => "sold on $op->{sell_exchange} \@$op->{sell_actual_price}",
+            };
+            my $rec_q = {
+                time     => int $op->{ctime},
+                currency => $op->{sell_quote_currency},
+                amount   => $frac_s * $op->{sell_actual_base_size} * $op->{sell_actual_price},
+                summary  => "received on $op->{sell_exchange} for selling $op->{base_currency} \@$op->{sell_actual_price}",
+            };
+            $sums{ $op->{base_currency}       } += $rec_b->{amount};
+            $sums{ $op->{sell_quote_currency} } += $rec_q->{amount};
+            push @recs, $rec_b, $rec_q;
+        }
+    }
+
+    for my $cur (sort keys %sums) {
+        push @recs, {
+            currency => $cur,
+            amount   => $sums{$cur},
+            summary  => 'Total',
+        };
+    }
+
+    my $resmeta = {
+        'table.fields'        => ['time',             'currency', 'amount', 'summary'],
+        'table.field_formats' => ['iso8601_datetime', undef,      $fnum8,   undef],
+        'table.field_aligns'  => ['left',             'left',     'right',  'left'],
+    };
+
+    [200, "OK", \@recs, $resmeta];
+}
+
 1;
 # ABSTRACT:
 
