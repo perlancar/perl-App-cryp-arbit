@@ -711,12 +711,14 @@ sub _create_orders {
     local $dbh->{RaiseError};
 
   ORDER_PAIR:
-    for my $op (@{ $r->{_stash}{order_pairs} }) {
+    for my $i (0..$#{ $r->{_stash}{order_pairs} }) {
+        my $op = $r->{_stash}{order_pairs}[$i];
         my $is_err;
         my $do_cancel_buy_order_on_err;
         my $do_cancel_sell_order_on_err;
 
-        log_debug "Creating order pair on the exchanges: %s ...", $op;
+        log_debug "[%d/%d] Creating order pair on the exchanges: %s ...",
+            $i+1, scalar(@{ $r->{_stash}{order_pairs} }), $op;
         my $buy  = $op->{buy};
         my $sell = $op->{sell};
         my $buy_eid  = _get_exchange_id($r, $buy ->{exchange});
