@@ -456,16 +456,22 @@ sub calculate_order_pairs {
     } # DETERMINE_SETS
 
     # since we're doing N sets, split the balance fairly for each set
-    my $account_balances = dclone($r->{_stash}{account_balances});
-    my $num_sets = keys %exchanges_for;
-    for my $e (keys %$account_balances) {
-        my $balances = $account_balances->{$e};
-        for my $cur (keys %$balances) {
-            my $recs = $balances->{$cur};
-            for my $rec (@$recs) {
-                $rec->{available} /= $num_sets;
+    my $account_balances_per_set;
+  DETERMINE_ACCOUNT_BALANCES_PER_SET:
+    {
+        $account_balances_per_set = dclone($r->{_stash}{account_balances});
+        my $num_sets = keys %exchanges_for;
+        for my $e (keys %$account_balances_per_set) {
+            my $balances = $account_balances_per_set->{$e};
+            for my $cur (keys %$balances) {
+                my $recs = $balances->{$cur};
+                for my $rec (@$recs) {
+                    $rec->{available} /= $num_sets;
+                }
             }
         }
+        log_trace "account balance: %s", $r->{_stash}{account_balances};
+        log_trace "account balance per set: %s", $account_balances_per_set;
     }
 
   SET:
@@ -639,6 +645,8 @@ sub calculate_order_pairs {
 
         #log_trace "all_buy_orders  for %s: %s", $base_currency, \@all_buy_orders;
         #log_trace "all_sell_orders for %s: %s", $base_currency, \@all_sell_orders;
+
+        my $account_balances = dclone($account_balances_per_set);
 
         my ($coin_order_pairs, $opportunity) = _calculate_order_pairs_for_base_currency(
             base_currency => $base_currency,
