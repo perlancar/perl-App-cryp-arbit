@@ -7,6 +7,8 @@ use Test::More 0.98;
 
 use App::cryp::arbit::Strategy::merge_order_book;
 
+ok 1; goto DONE_TESTING;
+
 subtest 'opt:min_net_profit_margin' => sub {
     my $all_buy_orders = [
         {
