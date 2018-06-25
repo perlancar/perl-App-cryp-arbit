@@ -297,6 +297,7 @@ our $db_schema_spec = {
     ],
 };
 
+my $fnum2 = [number => {precision=>2}];
 my $fnum4 = [number => {precision=>4}];
 my $fnum8 = [number => {precision=>8}];
 
@@ -1279,6 +1280,100 @@ sub check_orders {
 
     _check_orders($r);
     [200];
+}
+
+$SPEC{list_order_pairs} = {
+    v => 1.1,
+    summary => 'List created order pairs',
+    args => {
+        %args_db,
+        time_start => {
+            schema => 'date*',
+            tags => ['category:filtering'],
+        },
+        time_end => {
+            schema => 'date*',
+            tags => ['category:filtering'],
+        },
+        open => {
+            schema => 'bool*',
+            tags => ['category:filtering'],
+        },
+    },
+};
+sub list_order_pairs {
+    my %args = @_;
+
+    my $r = $args{-cmdline_r};
+
+    # [ux] remove extraneous arguments supplied by config
+    delete $r->{args}{accounts};
+
+    my $res;
+
+    $res = _init($r); return $res unless $res->[0] == 200;
+
+    my $dbh = $r->{_stash}{dbh};
+
+    my @wheres;
+    my @binds;
+    if (defined $args{open}) {
+        if ($args{open}) {
+            push @wheres, "buy_status NOT IN ('done', 'cancelled', 'filled')";
+        } else {
+            push @wheres, "buy_status     IN ('done', 'cancelled', 'filled')";
+        }
+    }
+    if ($args{time_start}) {
+        push @wheres, "ctime >= ?";
+        push @binds, $args{time_start};
+    }
+    if ($args{time_end}) {
+        push @wheres, "ctime <= ?";
+        push @binds, $args{time_end};
+    }
+    my $sth = $dbh->prepare(
+        "SELECT *, eb.safename buy_exchange, es.safename sell_exchange
+         FROM order_pair op
+         LEFT JOIN exchange eb ON op.buy_exchange_id=eb.id
+         LEFT JOIN exchange es ON op.sell_exchange_id=es.id
+         ".
+            (@wheres ? "WHERE ".join(" AND ", @wheres)." " : "").
+            "ORDER BY ctime");
+    $sth->execute(@binds);
+
+    my @recs;
+    while (my $op = $sth->fetchrow_hashref) {
+        my $rec = {
+            ctime => int $op->{ctime},
+            base_size => $op->{base_size},
+            base_currency => $op->{base_currency},
+
+            buy_exchange => $op->{buy_exchange},
+            buy_quote_currency => $op->{buy_quote_currency},
+            buy_actual_base_size => $op->{buy_actual_base_size},
+            buy_actual_price => $op->{buy_actual_price},
+            buy_filled_pct => defined($op->{buy_filled_base_size}) ? $op->{buy_filled_base_size} / $op->{buy_actual_base_size}*100 : undef,
+            buy_status => $op->{buy_status},
+
+            sell_exchange => $op->{sell_exchange},
+            sell_quote_currency => $op->{sell_quote_currency},
+            sell_actual_base_size => $op->{sell_actual_base_size},
+            sell_actual_price => $op->{sell_actual_price},
+            sell_filled_pct => defined($op->{sell_filled_base_size}) ? $op->{sell_filled_base_size} / $op->{sell_actual_base_size}*100 : undef,
+            sell_status => $op->{sell_status},
+
+        };
+        push @recs, $rec;
+    }
+
+    my $resmeta = {};
+    $resmeta->{'table.fields'}        = ['ctime'            , 'base_size', 'base_currency', 'buy_exchange', 'buy_actual_base_size', 'buy_actual_price', 'buy_quote_currency', 'buy_filled_pct', 'buy_status', 'sell_exchange', 'sell_actual_base_size', 'sell_actual_price', 'sell_quote_currency', 'sell_filled_pct', 'sell_status',];
+    $resmeta->{'table.field_labels'}  = [undef              , 'amount'   , 'c'            , 'buyFrom'     , 'buyAmount'           , 'buyPrice'        , 'buyC'              , 'buy%'          , 'buySt'     , 'sellTo'       , 'sellAmount'           , 'sellPrice'        , 'sellC'              , 'sell%'          , 'sellSt'     ,];
+    $resmeta->{'table.field_formats'} = ['iso8601_datetime' , $fnum8     , undef          , undef         , $fnum8                , $fnum8            , undef               , $fnum2          , undef       , undef          , $fnum8                 , $fnum8             , undef                , $fnum2           , undef        ,];
+    $resmeta->{'table.field_aligns'}  = ['left'             , 'right'    , 'left'         , 'left'        , 'right'               , 'right'           , 'left'              , 'right'         , 'left'      , 'left'         , 'right'                , 'right'            , 'left'               , 'right'          , 'left'       ,];
+
+    [200, "OK", \@recs, $resmeta];
 }
 
 $SPEC{get_profit_report} = {

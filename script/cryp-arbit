@@ -21,6 +21,7 @@ Perinci::CmdLine::cryp->new(
         arbit => { url=>"${prefix}arbit" },
         opportunities => { url=>"${prefix}show_opportunities" },
         'check-orders' => { url=>"${prefix}check_orders" },
+        'order-pairs' => { url=>"${prefix}list_order_pairs" },
         'profit-report' => { url=>"${prefix}get_profit_report" },
     },
 )->run;
@@ -55,6 +56,11 @@ Then to test:
 To really create sell/buy orders:
 
  % cryp-arbit arbit
+
+To list created order pairs:
+
+ % cryp-arbit order-pairs
+ % cryp-arbit order-pairs --open
 
 To check the status of created orders (and cancel orders that are not being
 filled for too long):
