@@ -49,6 +49,8 @@ inside it, for example:
 
 See L<App::cryp::arbit> for more details.
 
+=back
+
 
 =head1 INTERNAL NOTES
 

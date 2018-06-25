@@ -20,6 +20,8 @@ sub calculate_order_pairs {
 1;
 # ABSTRACT: Do nothing (for testing)
 
+=for Pod::Coverage ^(.+)$
+
 =head1 SYNOPSIS
 
 =head1 DESCRIPTION

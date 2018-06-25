@@ -705,7 +705,7 @@ In your F<cryp.conf>:
 
 This arbitration strategy uses information from merged order books. Below is the
 description of the algorithm. Suppose we are arbitraging the pair BTC/USD.
-I<E1>, I<E2<, ... I<En> are exchanges. I<P*> are prices. I<A*> are amounts. I<i>
+I<E1>, I<E2>, ... I<En> are exchanges. I<P*> are prices. I<A*> are amounts. I<i>
 denotes exchange index.
 
 B<First step:> get order books from all of the involved exchanges, for example:
@@ -787,6 +787,8 @@ the market price has moved above P, for example.
 
 
 =head1 CONFIGURATION
+
+=over
 
 =item * max_order_size_as_book_item_size_pct
 
