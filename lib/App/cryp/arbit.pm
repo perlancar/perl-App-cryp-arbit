@@ -1202,8 +1202,19 @@ sub _check_orders {
                     $op->{buy_order_id}, $op->{buy_pair}, $res;
                 last;
             } else {
-                $code_update_buy_status->($op->{id}, $res->[2]{status});
+                my $status = $res->[2]{status};
                 $code_update_buy_filled_base_size->($op->{id}, $res->[2]{filled_base_size});
+                $code_update_buy_status->($op->{id}, $status);
+
+                if ($status eq 'open' && $time - $op->{ctime} > $r->{args}{max_order_age}) {
+                    log_info "Order %s (buy) has been open for too long (>%d secs), cancelling ...";
+                    my $cancelres = $client->cancel_order(pair=>$op->{buy_pair}, type=>'buy', order_id=>$op->{buy_order_id});
+                    if ($cancelres->[0] != 200) {
+                        log_error "Couldn't cancel order %s (buy): %s", $op->{buy_order_id}, $cancelres;
+                    } else {
+                        $code_update_buy_status->($op->{id}, "cancelled");
+                    }
+                }
             }
         } # CHECK_BUY_ORDER
 
@@ -1221,8 +1232,19 @@ sub _check_orders {
                     $op->{sell_order_id}, $op->{sell_pair}, $res;
                 last;
             } else {
-                $code_update_sell_status->($op->{id}, $res->[2]{status});
+                my $status = $res->[2]{status};
                 $code_update_sell_filled_base_size->($op->{id}, $res->[2]{filled_base_size});
+                $code_update_sell_status->($op->{id}, $status);
+
+                if ($status eq 'open' && $time - $op->{ctime} > $r->{args}{max_order_age}) {
+                    log_info "Order %s (sell) has been open for too long (>%d secs), cancelling ...";
+                    my $cancelres = $client->cancel_order(pair=>$op->{sell_pair}, type=>'sell', order_id=>$op->{sell_order_id});
+                    if ($cancelres->[0] != 200) {
+                        log_error "Couldn't cancel order %s (sell): %s", $op->{sell_order_id}, $cancelres;
+                    } else {
+                        $code_update_sell_status->($op->{id}, "cancelled");
+                    }
+                }
             }
         } # CHECK_SELL_ORDER
     }
