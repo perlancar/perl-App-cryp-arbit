@@ -309,6 +309,24 @@ sub _exchange_catalog {
     $xcat;
 }
 
+sub _convert_to_usd {
+    require Finance::Currency::FiatX;
+
+    my ($r, $amount, $cur) = @_;
+
+    my $dbh = $r->{_stash}{dbh};
+
+    my $fxres  = Finance::Currency::FiatX::get_spot_rate(
+        dbh => $dbh, from => $cur, to => 'USD', type => 'sell');
+    die "Couldn't get conversion rate from $cur to USD: $fxres->[0] - $fxres->[1]"
+        unless $fxres->[0] == 200 || $fxres->[0] == 304;
+    log_info "Currency conversion rate for $cur/USD: %s", $fxres;
+
+    $r->{_stash}{fx}{$cur} = $fxres;
+
+    $amount * $fxres->[2]{rate};
+}
+
 # XXX move to App::cryp::Util or folio? given a safename, get or assign exchange
 # numeric ID from the database
 sub _get_exchange_id {
@@ -1389,6 +1407,10 @@ $SPEC{get_profit_report} = {
             schema => 'date*',
             tags => ['category:filtering'],
         },
+        detail => {
+            schema => 'bool*',
+            cmdline_aliases => {l=>{}},
+        },
     },
 };
 sub get_profit_report {
@@ -1416,17 +1438,24 @@ sub get_profit_report {
         push @binds, $args{time_end};
     }
     my $sth = $dbh->prepare(
-        "SELECT *, eb.safename buy_exchange, es.safename sell_exchange
+        "SELECT
+           *,
+           eb.safename buy_exchange, es.safename sell_exchange,
+           acb.nickname buy_account, acs.nickname sell_account
          FROM order_pair op
          LEFT JOIN exchange eb ON op.buy_exchange_id=eb.id
          LEFT JOIN exchange es ON op.sell_exchange_id=es.id
+         LEFT JOIN account acb ON op.buy_account_id=acb.id
+         LEFT JOIN account acs ON op.sell_account_id=acs.id
          ".
             (@wheres ? "WHERE ".join(" AND ", @wheres)." " : "").
             "ORDER BY ctime");
     $sth->execute(@binds);
 
     my @recs;
-    my %sums; # key = currency
+    my %per_currency_sums; # key = currency
+    my %per_currency_sums_usd; # key = currency
+    my %per_account_per_currency_sums; # key = "exchange/account", val = { currency1 => total, ... }
     while (my $op = $sth->fetchrow_hashref) {
       RECORD_BUY: {
             last unless defined $op->{buy_filled_base_size} && $op->{buy_filled_base_size};
@@ -1443,43 +1472,97 @@ sub get_profit_report {
                 amount   => -$frac_b * $op->{buy_actual_base_size} * $op->{buy_actual_price},
                 summary  => "spent on $op->{buy_exchange} for buying $op->{base_currency} \@$op->{buy_actual_price}",
             };
-            $sums{ $op->{base_currency}      } += $rec_b->{amount};
-            $sums{ $op->{buy_quote_currency} } += $rec_q->{amount};
-            push @recs, $rec_b, $rec_q;
+            $per_currency_sums{ $op->{base_currency}      } += $rec_b->{amount};
+            $per_currency_sums{ $op->{buy_quote_currency} } += $rec_q->{amount};
+
+            $per_currency_sums_usd{ $op->{buy_quote_currency} } += _convert_to_usd($r, $rec_q->{amount}, $op->{buy_quote_currency});
+
+            my $acckey = $op->{buy_exchange} . ($op->{buy_account} eq 'default' ? '' : "/$op->{buy_account}");
+            $per_account_per_currency_sums{ $acckey }{ $op->{base_currency}      } += $rec_b->{amount};
+            $per_account_per_currency_sums{ $acckey }{ $op->{buy_quote_currency} } += $rec_q->{amount};
+            push @recs, $rec_b, $rec_q if $args{detail};
         }
       RECORD_SELL: {
             last unless defined $op->{sell_filled_base_size} && $op->{sell_filled_base_size};
             my $frac_s = $op->{sell_filled_base_size} / $op->{sell_actual_base_size};
             my $rec_b = {
                 time     => int $op->{ctime},
+                summary  => "sold on $op->{sell_exchange} \@$op->{sell_actual_price}",
                 currency => $op->{base_currency},
                 amount   => -$frac_s * $op->{sell_actual_base_size},
-                summary  => "sold on $op->{sell_exchange} \@$op->{sell_actual_price}",
             };
             my $rec_q = {
                 time     => int $op->{ctime},
+                summary  => "received on $op->{sell_exchange} for selling $op->{base_currency} \@$op->{sell_actual_price}",
                 currency => $op->{sell_quote_currency},
                 amount   => $frac_s * $op->{sell_actual_base_size} * $op->{sell_actual_price},
-                summary  => "received on $op->{sell_exchange} for selling $op->{base_currency} \@$op->{sell_actual_price}",
             };
-            $sums{ $op->{base_currency}       } += $rec_b->{amount};
-            $sums{ $op->{sell_quote_currency} } += $rec_q->{amount};
-            push @recs, $rec_b, $rec_q;
+            $per_currency_sums{ $op->{base_currency}       } += $rec_b->{amount};
+            $per_currency_sums{ $op->{sell_quote_currency} } += $rec_q->{amount};
+
+            $per_currency_sums_usd{ $op->{sell_quote_currency} } += _convert_to_usd($r, $rec_q->{amount}, $op->{sell_quote_currency});
+
+            my $acckey = $op->{sell_exchange} . ($op->{sell_account} eq 'default' ? '' : "/$op->{sell_account}");
+            $per_account_per_currency_sums{ $acckey }{ $op->{base_currency}       } += $rec_b->{amount};
+            $per_account_per_currency_sums{ $acckey }{ $op->{sell_quote_currency} } += $rec_q->{amount};
+            push @recs, $rec_b, $rec_q if $args{detail};
         }
     }
 
-    for my $cur (sort keys %sums) {
+  PER_CURRENCY_PER_ACCOUNT_SUBTOTAL: {
+        for my $acckey (sort keys %per_account_per_currency_sums) {
+            my $per_currency_sums = $per_account_per_currency_sums{$acckey};
+            my $i = 0;
+            for my $cur (sort keys %$per_currency_sums) {
+                push @recs, {
+                    summary  => $i++ ? '' : "Account $acckey subtotal",
+                    currency => $cur,
+                    amount   => $per_currency_sums->{$cur},
+                };
+            }
+        }
+    }
+
+  PER_CURRENCY_SUBTOTAL: {
+        my $i = 0;
+        for my $cur (sort keys %per_currency_sums) {
+            my $rec = {
+                summary  => $i++ ? '' : "Per-currency subtotal",
+                currency => $cur,
+                amount   => $per_currency_sums{$cur},
+            };
+            $rec->{amount_usd} = $per_currency_sums_usd{$cur}
+                if exists $per_currency_sums_usd{$cur};
+            push @recs, $rec;
+        }
+    }
+
+  FIAT_PROFIT: {
+        my $profit = 0;
+        for my $cur (sort keys %per_currency_sums_usd) {
+            $profit += $per_currency_sums_usd{$cur};
+        }
         push @recs, {
-            currency => $cur,
-            amount   => $sums{$cur},
-            summary  => 'Total',
+            summary => 'Profit',
+            currency => 'USD',
+            amount => $profit,
+            amount_usd => $profit,
         };
+        for my $cur (sort keys %per_currency_sums) {
+            next if _is_fiat($cur);
+            next if $per_currency_sums{$cur} == 0;
+            push @recs, {
+                currency => $cur,
+                amount => $per_currency_sums{$cur},
+            };
+        }
     }
 
     my $resmeta = {
-        'table.fields'        => ['time',             'currency', 'amount', 'summary'],
-        'table.field_formats' => ['iso8601_datetime', undef,      $fnum8,   undef],
-        'table.field_aligns'  => ['left',             'left',     'right',  'left'],
+        'table.fields'        => ['time'            , 'summary', 'currency', 'amount', 'amount_usd'],
+        'table.field_labels'  => [undef             , undef    , 'c'        , undef  , 'amountUSD'],
+        'table.field_formats' => ['iso8601_datetime', undef    , undef     , $fnum8  , $fnum8],
+        'table.field_aligns'  => ['left'            , 'left'   , 'left'    , 'right' , 'right'],
     };
 
     [200, "OK", \@recs, $resmeta];
@@ -1584,6 +1667,7 @@ passing C<$r> around. The keys that are used by routines in this module:
    {exchange_pairs}            # key=exchange safename, value=[{name=>PAIR1, min_base_size=>..., min_quote_size=>...}, ...]
    {forex_rates}               # key=currency pair (e.g. IDR/USD), val=exchange rate (avg rate)
    {forex_spreads}             # key=fiat currency pair, e.g. USD/IDR, value=percentage
+   {fx}                        # key=currency value=result from get_spot_rate()
    {order_pairs}               # result from calculate_order_pairs()
    {quote_currencies}          # what currencies we use to buy/sell the base currencies
    {quote_currencies_for}      # key=base currency, value={quotecurrency1 => 1, quotecurrency2=>1, ...}
