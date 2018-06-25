@@ -243,14 +243,14 @@ sub _calculate_order_pairs_for_base_currency {
             }
             last unless $pair_rec;
             if (defined($pair_rec->{min_base_size}) && $order_pair->{base_size} < $pair_rec->{min_base_size}) {
-                #log_trace "buy order base size is too small (%.4f < %.4f), skipping this order pair: %s",
-                #    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
+                log_trace "buy order base size is too small (%.4f < %.4f), skipping this order pair: %s",
+                    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
                 next CREATE;
             }
             my $quote_size = $order_pair->{base_size}*$buy->{gross_price_orig};
             if (defined($pair_rec->{min_quote_size}) && $quote_size < $pair_rec->{min_quote_size}) {
-                #log_trace "buy order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
-                #    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
+                log_trace "buy order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
+                    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
                 next CREATE;
             }
         } # CHECK_MINIMUM_BUY_SIZE
@@ -268,14 +268,14 @@ sub _calculate_order_pairs_for_base_currency {
             }
             last unless $pair_rec;
             if (defined $pair_rec->{min_base_size} && $order_pair->{base_size} < $pair_rec->{min_base_size}) {
-                #log_trace "sell order base size is too small (%.4f < %.4f), skipping this order pair: %s",
-                #    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
+                log_trace "sell order base size is too small (%.4f < %.4f), skipping this order pair: %s",
+                    $order_pair->{base_size}, $pair_rec->{min_base_size}, $order_pair;
                 next CREATE;
             }
             my $quote_size = $order_pair->{base_size}*$sell->{gross_price_orig};
             if (defined $pair_rec->{min_quote_size} && $quote_size < $pair_rec->{min_quote_size}) {
-                #log_trace "sell order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
-                #    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
+                log_trace "sell order quote size is too small (%.4f < %.4f), skipping this order pair: %s",
+                    $quote_size, $pair_rec->{min_quote_size}, $order_pair;
                 next CREATE;
             }
         } # CHECK_MINIMUM_SELL_SIZE
@@ -299,7 +299,7 @@ sub _calculate_order_pairs_for_base_currency {
                 # there is no forex spread
                 $op->{net_profit_margin} = $op->{trading_profit_margin};
                 $op->{net_profit} = $op->{trading_profit};
-                next ORDER_PAIR;
+                goto ADD;
             }
 
             my $spread;
@@ -322,6 +322,8 @@ sub _calculate_order_pairs_for_base_currency {
                     $i, $op->{net_profit_margin}, $min_net_profit_margin;
                 next ORDER_PAIR;
             }
+
+          ADD:
             push @order_pairs, $op;
         }
     } # ADJUST_FOREX_SPREAD
