@@ -39,7 +39,7 @@ can be shared between cryp-* family of scripts):
  ; db_username = youruser         ; optional, will be searched in ~/.my.cnf
  ; db_password = yourpass         ; optional, will be searched in ~/.my.cnf
 
- [exchange/bitcoin-indonesia]
+ [exchange/indodax]
  key = ...
  secret = ...
 
