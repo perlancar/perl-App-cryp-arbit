@@ -11,7 +11,7 @@ use Role::Tiny::With;
 
 with 'App::cryp::Role::ArbitStrategy';
 
-sub create_order_pairs {
+sub calculate_order_pairs {
     my ($pkg, %args) = @_;
 
     return [200, "OK", []];
