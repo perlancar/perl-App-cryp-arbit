@@ -429,6 +429,7 @@ sub _get_account_balances {
     $r->{_stash}{account_balances} = {};
     for my $e (sort keys %{ $r->{_stash}{account_exchanges} }) {
         my $accounts = $r->{_stash}{account_exchanges}{$e};
+      ACC:
         for my $acc (sort keys %$accounts) {
             my $client = _get_exchange_client($r, $e, $acc);
             my $time = time();
