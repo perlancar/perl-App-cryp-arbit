@@ -71,7 +71,7 @@ sub _calculate_order_pairs_for_base_currency {
                 if ($account_balances) {
                     # we don't have any inventory left to sell on this selling
                     # exchange
-                    unless (@{ $account_balances->{ $sell->{exchange} }{$base_currency} }) {
+                    unless (@{ $account_balances->{ $sell->{exchange} }{$base_currency} // [] }) {
                         $sell_index++; next;
                     }
                 }
@@ -93,7 +93,7 @@ sub _calculate_order_pairs_for_base_currency {
                 }
                 if ($account_balances) {
                     # we don't have any inventory left to buy from this exchange
-                    unless (@{ $account_balances->{ $buy->{exchange} }{$buy->{quote_currency}} }) {
+                    unless (@{ $account_balances->{ $buy->{exchange} }{$buy->{quote_currency}} // [] }) {
                         $buy_index++; next;
                     }
                 }
