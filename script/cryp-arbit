@@ -11,6 +11,7 @@ use Perinci::CmdLine::cryp;
 
 my $prefix = '/App/cryp/arbit/';
 
+$ENV{LOG_ADD_TIMESTAMP} //= 1;
 Perinci::CmdLine::cryp->new(
     url => $prefix,
     log => 1,
