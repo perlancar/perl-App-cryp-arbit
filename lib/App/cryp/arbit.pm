@@ -600,9 +600,12 @@ sub _get_exchange_client {
             "Please specify [exchange/$exchange/$account] section in configuration";
     }
 
-    my $client = $mod->new(
-        %{ $r->{_cryp}{exchanges}{$exchange}{$account} }
-    );
+    my %client_args = %{ $r->{_cryp}{exchanges}{$exchange}{$account} // {} };
+    unless ($client_args{api_key}) {
+        $client_args{public_only} = 1;
+    }
+
+    my $client = $mod->new(%client_args);
 
     $r->{_stash}{exchange_clients}{$exchange}{$account} = $client;
 }
