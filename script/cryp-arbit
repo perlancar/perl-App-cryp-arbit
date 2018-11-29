@@ -20,6 +20,7 @@ Perinci::CmdLine::cryp->new(
     subcommands => {
         "dump-cryp-config" => { url=>"${prefix}dump_cryp_config" },
         arbit => { url=>"${prefix}arbit" },
+        'collect-orderbooks' => { url=>"${prefix}collect_orderbooks" },
         opportunities => { url=>"${prefix}show_opportunities" },
         'check-orders' => { url=>"${prefix}check_orders" },
         'order-pairs' => { url=>"${prefix}list_order_pairs" },
