@@ -1345,7 +1345,7 @@ sub collect_orderbooks {
                   TYPE:
                     for my $type ("buy", "sell") {
                         # sanity checks
-                        unless (@{ $res->[2]{$type} }) {
+                        unless ($res->[2]{$type} && @{ $res->[2]{$type} }) {
                             log_warn "No $type orders for %s on %s, skipping",
                                 $pair, $exchange;
                             next;
