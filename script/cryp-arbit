@@ -81,6 +81,9 @@ To get profit report:
 
  % cryp-arbit profit-report
 
+ # Use specified USD spot rates (e.g. USD/IDR=14500, USD/THB=33.25)
+ % cryp-arbit profit-report --usd-rate IDR=14500 --usd-rate THB=33.25
+
 For other subcommands, use C<cryp-arbit --help> or see the documentation.
 
 
